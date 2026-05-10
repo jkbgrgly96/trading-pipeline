@@ -575,6 +575,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pandas-ta-classic"
+version = "0.5.44"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pandas" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/18/d5/c03cb801e792ae57c125ae5fa18fa4a948164dd1c33302a6fce50020e5a3/pandas_ta_classic-0.5.44-py3-none-any.whl", hash = "sha256:cfd444639741a60fc39d0f30132799f1884a001b368526ecc063dcb3ad2f25ee", size = 402330, upload-time = "2026-04-30T12:03:15.785Z" },
+]
+
+[[package]]
 name = "pillow"
 version = "12.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -953,6 +965,7 @@ source = { editable = "." }
 dependencies = [
     { name = "alpaca-py" },
     { name = "backtesting" },
+    { name = "pandas-ta-classic" },
     { name = "pip" },
 ]
 
@@ -965,6 +978,7 @@ dev = [
 requires-dist = [
     { name = "alpaca-py", specifier = ">=0.35.0" },
     { name = "backtesting", specifier = ">=0.6.0" },
+    { name = "pandas-ta-classic", specifier = ">=0.5.44" },
     { name = "pip", specifier = ">=26.1.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
 ]

@@ -14,6 +14,12 @@ def generate_signal(symbol: str, asset_class: AssetClass, bars: list[Bar]) -> Si
     slow = sma(closes, 50)
     rsi_values = rsi(closes, 14)
     patterns = detect_patterns(bars)
+    bullish_patterns = [
+        pattern for pattern in patterns if pattern.startswith("bullish_")
+    ]
+    bearish_patterns = [
+        pattern for pattern in patterns if pattern.startswith("bearish_")
+    ]
 
     latest = bars[-1]
     previous_fast = fast[-2]
@@ -37,9 +43,9 @@ def generate_signal(symbol: str, asset_class: AssetClass, bars: list[Bar]) -> Si
     if bullish_cross and latest_rsi < 70:
         confidence = 0.65
         reason_parts = ["sma20_crossed_above_sma50", f"rsi={latest_rsi:.1f}"]
-        if "bullish_engulfing" in patterns or "hammer" in patterns:
+        if bullish_patterns:
             confidence += 0.1
-            reason_parts.append("bullish_candle_pattern")
+            reason_parts.append(f"bullish_candle_pattern={bullish_patterns[0]}")
         return Signal(
             symbol=symbol,
             asset_class=asset_class,
@@ -58,9 +64,9 @@ def generate_signal(symbol: str, asset_class: AssetClass, bars: list[Bar]) -> Si
         if bearish_cross:
             reason_parts.append("sma20_crossed_below_sma50")
         reason_parts.append(f"rsi={latest_rsi:.1f}")
-        if "bearish_engulfing" in patterns or "shooting_star" in patterns:
+        if bearish_patterns:
             confidence += 0.1
-            reason_parts.append("bearish_candle_pattern")
+            reason_parts.append(f"bearish_candle_pattern={bearish_patterns[0]}")
         return Signal(
             symbol=symbol,
             asset_class=asset_class,

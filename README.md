@@ -81,11 +81,8 @@ The initial strategy is deliberately simple:
 
 - SMA 20 / SMA 50 crossover
 - RSI 14 filter
-- Basic candlestick confirmation:
-  - bullish engulfing
-  - bearish engulfing
-  - hammer
-  - shooting star
+- pandas-ta-classic candlestick confirmation across the available candle
+  pattern set
 
 This is a starting point for pipeline validation, not a production-grade trading
 strategy.

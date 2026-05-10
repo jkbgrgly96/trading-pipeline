@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "alpaca-py>=0.35.0",
     "backtesting>=0.6.0",
+    "pandas-ta-classic>=0.5.44",
     "pip>=26.1.1",
 ]
 
