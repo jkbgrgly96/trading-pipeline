@@ -31,6 +31,7 @@ class Settings:
     alpaca_api_key: str
     alpaca_secret_key: str
     alpaca_paper: bool = True
+    alpaca_stock_feed: str = "iex"
     trading_mode: str = "alerts_only"
     place_orders: bool = False
     telegram_bot_token: str | None = None
@@ -52,6 +53,7 @@ def load_settings() -> Settings:
         alpaca_api_key=os.getenv("ALPACA_API_KEY", ""),
         alpaca_secret_key=os.getenv("ALPACA_SECRET_KEY", ""),
         alpaca_paper=_as_bool(os.getenv("ALPACA_PAPER"), True),
+        alpaca_stock_feed=os.getenv("ALPACA_STOCK_FEED", "iex").strip().lower(),
         trading_mode=os.getenv("TRADING_MODE", "alerts_only").strip().lower(),
         place_orders=_as_bool(os.getenv("PLACE_ORDERS"), False),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,

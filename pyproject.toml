@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "alpaca-py>=0.35.0",
+    "backtesting>=0.6.0",
     "pip>=26.1.1",
 ]
 

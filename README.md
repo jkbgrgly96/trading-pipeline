@@ -51,6 +51,22 @@ $env:ALPACA_SECRET_KEY="..."
 trading-pipeline --symbol "BTC/USD" --asset-class crypto --timeframe 1Hour --limit 250
 ```
 
+Backtest example:
+
+```powershell
+trading-pipeline --backtest --symbol AAPL --asset-class stock --timeframe 1Day --limit 1000 --cash 10000 --commission 0.001
+```
+
+Crypto backtests use Backtesting.py's fractional engine:
+
+```powershell
+trading-pipeline --backtest --symbol "BTC/USD" --asset-class crypto --timeframe 1Hour --limit 500 --cash 10000 --commission 0.001
+```
+
+The backtest uses Backtesting.py and runs the same SMA/RSI/candlestick signal
+logic as the alert pipeline. It is long-only: `BUY` opens a position and `SELL`
+closes an open position.
+
 Telegram alerts are optional:
 
 ```powershell

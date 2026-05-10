@@ -8,7 +8,13 @@ from trading_pipeline.domain import AssetClass, Bar, Signal, SignalAction
 
 
 class AlpacaBroker(Broker):
-    def __init__(self, api_key: str, secret_key: str, paper: bool = True) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        secret_key: str,
+        paper: bool = True,
+        stock_feed: str = "iex",
+    ) -> None:
         if not api_key or not secret_key:
             raise ValueError("ALPACA_API_KEY and ALPACA_SECRET_KEY must be set.")
 
@@ -24,6 +30,7 @@ class AlpacaBroker(Broker):
         self._stock_data_client = StockHistoricalDataClient(api_key, secret_key)
         self._crypto_data_client = CryptoHistoricalDataClient(api_key, secret_key)
         self._trading_client = TradingClient(api_key, secret_key, paper=paper)
+        self._stock_feed = _to_data_feed(stock_feed)
 
     def get_bars(
         self,
@@ -47,6 +54,7 @@ class AlpacaBroker(Broker):
         end: datetime,
         limit: int,
     ) -> list[Bar]:
+        from alpaca.common.enums import Sort
         from alpaca.data.requests import StockBarsRequest
 
         request = StockBarsRequest(
@@ -55,6 +63,8 @@ class AlpacaBroker(Broker):
             start=start,
             end=end,
             limit=limit,
+            sort=Sort.DESC,
+            feed=self._stock_feed,
         )
         response = self._stock_data_client.get_stock_bars(request)
         return _extract_bars(response, symbol)
@@ -67,6 +77,7 @@ class AlpacaBroker(Broker):
         end: datetime,
         limit: int,
     ) -> list[Bar]:
+        from alpaca.common.enums import Sort
         from alpaca.data.requests import CryptoBarsRequest
 
         request = CryptoBarsRequest(
@@ -75,6 +86,7 @@ class AlpacaBroker(Broker):
             start=start,
             end=end,
             limit=limit,
+            sort=Sort.DESC,
         )
         response = self._crypto_data_client.get_crypto_bars(request)
         return _extract_bars(response, symbol)
@@ -118,6 +130,24 @@ def _to_alpaca_timeframe(value: str) -> Any:
         return mapping[normalized]
     except KeyError as exc:
         raise ValueError(f"Unsupported timeframe: {value}") from exc
+
+
+def _to_data_feed(value: str) -> Any:
+    from alpaca.data.enums import DataFeed
+
+    normalized = value.strip().lower()
+    mapping = {
+        "iex": DataFeed.IEX,
+        "sip": DataFeed.SIP,
+        "delayed_sip": DataFeed.DELAYED_SIP,
+        "otc": DataFeed.OTC,
+        "boats": DataFeed.BOATS,
+        "overnight": DataFeed.OVERNIGHT,
+    }
+    try:
+        return mapping[normalized]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported Alpaca stock feed: {value}") from exc
 
 
 def _lookback_for(timeframe: str, limit: int) -> timedelta:
