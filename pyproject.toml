@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-pipeline"
+version = "0.1.0"
+description = "Alert-first trading pipeline with Alpaca paper trading support."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "alpaca-py>=0.35.0",
+    "pip>=26.1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+trading-pipeline = "trading_pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
