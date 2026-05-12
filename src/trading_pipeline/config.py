@@ -41,6 +41,7 @@ class Settings:
     default_timeframe: str = "1Day"
     default_bar_limit: int = 250
     default_notional: float = 100.0
+    database_path: str = "data/trading_pipeline.sqlite3"
 
     @property
     def orders_enabled(self) -> bool:
@@ -63,4 +64,5 @@ def load_settings() -> Settings:
         default_timeframe=os.getenv("DEFAULT_TIMEFRAME", "1Day"),
         default_bar_limit=int(os.getenv("DEFAULT_BAR_LIMIT", "250")),
         default_notional=float(os.getenv("DEFAULT_NOTIONAL", "100")),
+        database_path=os.getenv("DATABASE_PATH", "data/trading_pipeline.sqlite3"),
     )

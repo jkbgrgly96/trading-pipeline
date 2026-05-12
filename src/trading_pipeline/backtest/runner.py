@@ -28,6 +28,7 @@ class BacktestResult:
     stats: Any
     trades: pd.DataFrame
     equity_curve: pd.DataFrame
+    feature_frame: pd.DataFrame
 
 
 def run_strategy_backtest(bars: list[Bar], config: BacktestConfig) -> BacktestResult:
@@ -61,6 +62,7 @@ def run_strategy_backtest(bars: list[Bar], config: BacktestConfig) -> BacktestRe
         stats=stats,
         trades=stats["_trades"],
         equity_curve=stats["_equity_curve"],
+        feature_frame=feature_frame,
     )
 
 

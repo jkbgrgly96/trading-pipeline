@@ -33,6 +33,12 @@ Copy-Item .env.example .env
 Fill in `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` in `.env`.
 The app reads `.env` automatically; exporting variables manually also works.
 
+Runs persist to SQLite by default:
+
+```text
+DATABASE_PATH=data/trading_pipeline.sqlite3
+```
+
 ## Run
 
 Stock example:
@@ -93,3 +99,15 @@ The initial strategy is deliberately simple:
 
 This is a starting point for pipeline validation, not a production-grade trading
 strategy.
+
+## Storage
+
+The CLI initializes SQLite automatically and stores:
+
+- `market_bars`: OHLCV bars by symbol, asset class, timeframe, timestamp
+- `feature_snapshots`: normalized indicator values and detected patterns
+- `signals`: alert decisions with reason, feature snapshot, and optional order id
+- `backtest_runs`: summary metrics and full stats JSON
+- `backtest_trades`: Backtesting.py trade rows linked to a backtest run
+
+The `data/` directory is ignored by git.

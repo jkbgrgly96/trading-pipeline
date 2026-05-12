@@ -14,6 +14,7 @@ from trading_pipeline.domain import AssetClass
 from trading_pipeline.notifications.console import ConsoleNotifier
 from trading_pipeline.notifications.telegram import TelegramNotifier
 from trading_pipeline.pipeline import run_once
+from trading_pipeline.storage import Storage
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,8 +83,20 @@ def main(argv: list[str] | None = None) -> int:
         paper=settings.alpaca_paper,
         stock_feed=settings.alpaca_stock_feed,
     )
+    storage = Storage(settings.database_path)
+    storage.initialize()
 
     if args.backtest:
+        backtest_config = BacktestConfig(
+            symbol=symbol,
+            asset_class=asset_class,
+            cash=args.cash,
+            commission=args.commission,
+            spread=args.spread,
+            position_size=args.position_size,
+            trade_on_close=args.trade_on_close,
+            fractional_unit=args.fractional_unit,
+        )
         bars = broker.get_bars(
             symbol=symbol,
             asset_class=asset_class,
@@ -92,18 +105,25 @@ def main(argv: list[str] | None = None) -> int:
         )
         result = run_strategy_backtest(
             bars=bars,
-            config=BacktestConfig(
-                symbol=symbol,
-                asset_class=asset_class,
-                cash=args.cash,
-                commission=args.commission,
-                spread=args.spread,
-                position_size=args.position_size,
-                trade_on_close=args.trade_on_close,
-                fractional_unit=args.fractional_unit,
-            ),
+            config=backtest_config,
+        )
+        storage.save_market_bars(symbol, asset_class, timeframe, bars, source="alpaca")
+        storage.save_feature_snapshots(
+            symbol,
+            asset_class,
+            timeframe,
+            result.feature_frame,
+        )
+        backtest_run_id = storage.save_backtest(
+            symbol=symbol,
+            asset_class=asset_class,
+            timeframe=timeframe,
+            bar_limit=limit,
+            config=backtest_config,
+            result=result,
         )
         _print_backtest_summary(summarize_stats(result.stats))
+        print(f"backtest_run_id={backtest_run_id}")
         return 0
 
     notifier = _build_notifier(args.telegram, settings)
@@ -117,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         limit=limit,
         orders_enabled=settings.orders_enabled,
         notional=notional,
+        storage=storage,
     )
 
     if result.order_id:
