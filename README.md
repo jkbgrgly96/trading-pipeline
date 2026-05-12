@@ -67,6 +67,11 @@ The backtest uses Backtesting.py and runs the same SMA/RSI/candlestick signal
 logic as the alert pipeline. It is long-only: `BUY` opens a position and `SELL`
 closes an open position.
 
+Indicators and candlestick patterns are computed through a small feature
+framework backed by pandas-ta-classic. Backtests precompute the full feature
+frame once, then each Backtesting.py step reads the current feature row instead
+of recalculating indicators for every candle.
+
 Telegram alerts are optional:
 
 ```powershell
@@ -83,6 +88,8 @@ The initial strategy is deliberately simple:
 - RSI 14 filter
 - pandas-ta-classic candlestick confirmation across the available candle
   pattern set
+- additional feature columns are already computed for MACD, Bollinger Bands,
+  and ATR for future strategy/risk work
 
 This is a starting point for pipeline validation, not a production-grade trading
 strategy.

@@ -6,7 +6,9 @@ from typing import Any
 import pandas as pd
 
 from trading_pipeline.domain import AssetClass, Bar, SignalAction
-from trading_pipeline.strategies.sma_rsi import generate_signal
+from trading_pipeline.features import compute_feature_frame, snapshot_from_frame
+from trading_pipeline.features.frame import bars_to_ohlcv_frame
+from trading_pipeline.strategies.sma_rsi import generate_signal_from_features
 
 
 @dataclass(frozen=True)
@@ -28,23 +30,6 @@ class BacktestResult:
     equity_curve: pd.DataFrame
 
 
-def bars_to_ohlcv_frame(bars: list[Bar]) -> pd.DataFrame:
-    if not bars:
-        raise ValueError("Cannot backtest an empty bar list.")
-
-    frame = pd.DataFrame(
-        {
-            "Open": [bar.open for bar in bars],
-            "High": [bar.high for bar in bars],
-            "Low": [bar.low for bar in bars],
-            "Close": [bar.close for bar in bars],
-            "Volume": [bar.volume for bar in bars],
-        },
-        index=pd.DatetimeIndex([bar.timestamp for bar in bars], name="Timestamp"),
-    )
-    return frame.sort_index()
-
-
 def run_strategy_backtest(bars: list[Bar], config: BacktestConfig) -> BacktestResult:
     try:
         from backtesting import Backtest
@@ -54,6 +39,7 @@ def run_strategy_backtest(bars: list[Bar], config: BacktestConfig) -> BacktestRe
             "backtesting.py is not installed. Run: pip install -e .[dev]"
         ) from exc
 
+    feature_frame = compute_feature_frame(bars)
     strategy = _build_strategy_class(config)
     backtest_class = (
         FractionalBacktest if config.asset_class == AssetClass.CRYPTO else Backtest
@@ -69,7 +55,7 @@ def run_strategy_backtest(bars: list[Bar], config: BacktestConfig) -> BacktestRe
     if backtest_class is FractionalBacktest:
         backtest_kwargs["fractional_unit"] = config.fractional_unit
 
-    backtest = backtest_class(bars_to_ohlcv_frame(bars), strategy, **backtest_kwargs)
+    backtest = backtest_class(feature_frame, strategy, **backtest_kwargs)
     stats = backtest.run()
     return BacktestResult(
         stats=stats,
@@ -107,14 +93,16 @@ def _build_strategy_class(config: BacktestConfig):
             pass
 
         def next(self) -> None:
-            current_bars = _frame_to_bars(self.data.df)
-            if len(current_bars) < 60:
+            current_length = len(self.data)
+            if current_length < 60:
                 return
 
-            signal = generate_signal(
+            visible_frame = self.data.df.iloc[:current_length]
+            signal = generate_signal_from_features(
                 symbol=self.symbol,
                 asset_class=self.asset_class,
-                bars=current_bars,
+                latest=snapshot_from_frame(visible_frame, -1),
+                previous=snapshot_from_frame(visible_frame, -2),
             )
 
             if signal.action == SignalAction.BUY and not self.position:
@@ -127,19 +115,3 @@ def _build_strategy_class(config: BacktestConfig):
                 self.position.close()
 
     return SmaRsiBacktestingStrategy
-
-
-def _frame_to_bars(frame: pd.DataFrame) -> list[Bar]:
-    bars: list[Bar] = []
-    for timestamp, row in frame.iterrows():
-        bars.append(
-            Bar(
-                timestamp=timestamp.to_pydatetime(),
-                open=float(row["Open"]),
-                high=float(row["High"]),
-                low=float(row["Low"]),
-                close=float(row["Close"]),
-                volume=float(row.get("Volume", 0.0)),
-            )
-        )
-    return bars
