@@ -86,6 +86,22 @@ $env:TELEGRAM_CHAT_ID="..."
 trading-pipeline --symbol AAPL --telegram
 ```
 
+Dashboard:
+
+```powershell
+trading-dashboard --server.port 8501
+```
+
+The dashboard reads the SQLite database configured by `DATABASE_PATH` and
+includes overview metrics, signal history, candlestick charts with indicators,
+and backtest run/trade tables.
+
+Run the test suite:
+
+```powershell
+python -m pytest -q
+```
+
 ## Current strategy
 
 The initial strategy is deliberately simple:
