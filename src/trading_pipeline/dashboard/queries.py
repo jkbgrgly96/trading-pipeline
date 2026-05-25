@@ -174,6 +174,23 @@ def load_backtest_trades(database_path: str | Path, backtest_run_id: int) -> pd.
     return _parse_datetime_columns(frame, ["entry_time", "exit_time"])
 
 
+def load_backtest_equity_curve(
+    database_path: str | Path,
+    backtest_run_id: int,
+) -> pd.DataFrame:
+    frame = _read_sql(
+        database_path,
+        """
+        SELECT *
+        FROM backtest_equity_curve
+        WHERE backtest_run_id = ?
+        ORDER BY timestamp ASC
+        """,
+        [backtest_run_id],
+    )
+    return _parse_datetime_columns(frame, ["timestamp"])
+
+
 def _filter_clauses(
     symbol: str | None,
     asset_class: str | None,
@@ -230,6 +247,7 @@ def _table_counts(connection: sqlite3.Connection) -> dict[str, int]:
         "signals",
         "backtest_runs",
         "backtest_trades",
+        "backtest_equity_curve",
     ]
     return {
         table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])

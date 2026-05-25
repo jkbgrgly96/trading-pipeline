@@ -199,6 +199,7 @@ class Storage:
             )
             run_id = int(cursor.lastrowid)
             self._save_backtest_trades(connection, run_id, symbol, result.trades)
+            self._save_backtest_equity_curve(connection, run_id, result.equity_curve)
             return run_id
 
     def _save_backtest_trades(
@@ -237,9 +238,75 @@ class Storage:
             rows,
         )
 
+    def _save_backtest_equity_curve(
+        self,
+        connection: sqlite3.Connection,
+        backtest_run_id: int,
+        equity_curve: pd.DataFrame,
+    ) -> None:
+        if equity_curve.empty:
+            return
+
+        curve = equity_curve.copy()
+        equity_column = _find_first_column(curve, ["Equity", "equity"])
+        drawdown_column = _find_first_column(
+            curve,
+            ["DrawdownPct", "Drawdown [%]", "Drawdown", "drawdown_pct"],
+            required=False,
+        )
+
+        equity = pd.to_numeric(curve[equity_column], errors="coerce")
+        if drawdown_column:
+            drawdown_pct = pd.to_numeric(curve[drawdown_column], errors="coerce")
+            if drawdown_column == "Drawdown":
+                drawdown_pct = drawdown_pct * 100
+        else:
+            peak = equity.cummax()
+            drawdown_pct = ((equity / peak) - 1) * 100
+
+        rows = []
+        for (timestamp, row), equity_value, drawdown_value in zip(
+            curve.iterrows(),
+            equity,
+            drawdown_pct,
+            strict=True,
+        ):
+            rows.append(
+                (
+                    backtest_run_id,
+                    _to_storage_value(timestamp),
+                    _to_storage_value(equity_value),
+                    _to_storage_value(drawdown_value),
+                    _json(row.to_dict()),
+                )
+            )
+
+        connection.executemany(
+            """
+            INSERT INTO backtest_equity_curve (
+                backtest_run_id, timestamp, equity, drawdown_pct, raw_json
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
 
 def _backtest_summary(stats: Mapping[str, Any]) -> dict[str, Any]:
     return {key: _to_storage_value(value) for key, value in stats.items() if not key.startswith("_")}
+
+
+def _find_first_column(
+    frame: pd.DataFrame,
+    candidates: list[str],
+    required: bool = True,
+) -> str | None:
+    for candidate in candidates:
+        if candidate in frame.columns:
+            return candidate
+    if required:
+        raise KeyError(f"None of the columns exist: {candidates}")
+    return None
 
 
 def _json(value: Any) -> str:
@@ -255,6 +322,8 @@ def _to_jsonable(value: Any) -> Any:
         return None
     if hasattr(value, "isoformat"):
         return value.isoformat()
+    if hasattr(value, "item"):
+        return value.item()
     return value
 
 
@@ -368,4 +437,17 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
     raw_json TEXT NOT NULL,
     FOREIGN KEY(backtest_run_id) REFERENCES backtest_runs(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS backtest_equity_curve (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    backtest_run_id INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    equity REAL,
+    drawdown_pct REAL,
+    raw_json TEXT NOT NULL,
+    FOREIGN KEY(backtest_run_id) REFERENCES backtest_runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_equity_curve_lookup
+ON backtest_equity_curve(backtest_run_id, timestamp);
 """

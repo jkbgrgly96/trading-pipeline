@@ -134,6 +134,94 @@ def build_trade_pnl_chart(trades: pd.DataFrame) -> go.Figure:
     return figure
 
 
+def build_equity_curve_chart(equity_curve: pd.DataFrame) -> go.Figure:
+    figure = go.Figure()
+    if equity_curve.empty or "equity" not in equity_curve.columns:
+        figure.update_layout(template="plotly_white", height=320)
+        return figure
+
+    figure.add_trace(
+        go.Scatter(
+            x=equity_curve["timestamp"],
+            y=equity_curve["equity"],
+            mode="lines",
+            name="Equity",
+            line={"color": "#2563eb", "width": 2},
+        )
+    )
+    figure.update_layout(
+        template="plotly_white",
+        height=340,
+        margin={"l": 40, "r": 20, "t": 30, "b": 30},
+        yaxis_title="Equity",
+        hovermode="x unified",
+    )
+    return figure
+
+
+def build_drawdown_chart(equity_curve: pd.DataFrame) -> go.Figure:
+    figure = go.Figure()
+    if equity_curve.empty or "drawdown_pct" not in equity_curve.columns:
+        figure.update_layout(template="plotly_white", height=260)
+        return figure
+
+    figure.add_trace(
+        go.Scatter(
+            x=equity_curve["timestamp"],
+            y=equity_curve["drawdown_pct"],
+            mode="lines",
+            name="Drawdown",
+            fill="tozeroy",
+            line={"color": "#dc2626", "width": 1.5},
+        )
+    )
+    figure.update_layout(
+        template="plotly_white",
+        height=280,
+        margin={"l": 40, "r": 20, "t": 30, "b": 30},
+        yaxis_title="Drawdown %",
+        hovermode="x unified",
+    )
+    return figure
+
+
+def build_trade_overlay_chart(
+    bars: pd.DataFrame,
+    trades: pd.DataFrame,
+) -> go.Figure:
+    figure = go.Figure()
+    if bars.empty:
+        figure.update_layout(template="plotly_white", height=420)
+        return figure
+
+    figure.add_trace(
+        go.Candlestick(
+            x=bars["timestamp"],
+            open=bars["open"],
+            high=bars["high"],
+            low=bars["low"],
+            close=bars["close"],
+            name="OHLC",
+            increasing_line_color="#16a34a",
+            decreasing_line_color="#dc2626",
+        )
+    )
+
+    if not trades.empty:
+        _add_trade_points(figure, trades, "entry_time", "entry_price", "Entry", "triangle-up")
+        _add_trade_points(figure, trades, "exit_time", "exit_price", "Exit", "triangle-down")
+
+    figure.update_layout(
+        template="plotly_white",
+        height=520,
+        margin={"l": 40, "r": 20, "t": 30, "b": 30},
+        hovermode="x unified",
+        xaxis_rangeslider_visible=False,
+        yaxis_title="Price",
+    )
+    return figure
+
+
 def _rows(show_rsi: bool, show_macd: bool, show_atr: bool) -> list[tuple[str, str]]:
     rows = [("Price", "price"), ("Volume", "volume")]
     if show_rsi:
@@ -278,3 +366,32 @@ def _add_signal_markers(
             row=row,
             col=1,
         )
+
+
+def _add_trade_points(
+    figure: go.Figure,
+    trades: pd.DataFrame,
+    time_column: str,
+    price_column: str,
+    name: str,
+    marker_symbol: str,
+) -> None:
+    if time_column not in trades.columns or price_column not in trades.columns:
+        return
+    pnl = pd.to_numeric(trades.get("pnl"), errors="coerce").fillna(0)
+    colors = ["#16a34a" if value >= 0 else "#dc2626" for value in pnl]
+    figure.add_trace(
+        go.Scatter(
+            x=trades[time_column],
+            y=trades[price_column],
+            mode="markers",
+            name=name,
+            text=trades.get("pnl"),
+            marker={
+                "symbol": marker_symbol,
+                "color": colors,
+                "size": 11,
+                "line": {"color": "#ffffff", "width": 1},
+            },
+        )
+    )

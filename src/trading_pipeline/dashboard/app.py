@@ -8,7 +8,13 @@ from streamlit.web import cli as streamlit_cli
 import pandas as pd
 
 from trading_pipeline.config import load_settings
-from trading_pipeline.dashboard.charts import build_market_chart, build_trade_pnl_chart
+from trading_pipeline.dashboard.charts import (
+    build_drawdown_chart,
+    build_equity_curve_chart,
+    build_market_chart,
+    build_trade_overlay_chart,
+    build_trade_pnl_chart,
+)
 from trading_pipeline.dashboard import queries
 from trading_pipeline.dashboard.formatting import (
     compact_dict,
@@ -401,6 +407,15 @@ def _render_backtests(
     metrics[4].metric("Trades", format_number(selected_run.get("trade_count"), decimals=0))
 
     trades = queries.load_backtest_trades(database_path, int(run_id))
+    equity_curve = queries.load_backtest_equity_curve(database_path, int(run_id))
+    if not equity_curve.empty:
+        st.subheader("Equity Curve")
+        st.plotly_chart(build_equity_curve_chart(equity_curve), use_container_width=True)
+        st.subheader("Drawdown")
+        st.plotly_chart(build_drawdown_chart(equity_curve), use_container_width=True)
+    else:
+        st.info("No equity curve rows are stored for this backtest run.")
+
     if not trades.empty:
         pnl = pd.to_numeric(trades["pnl"], errors="coerce").fillna(0)
         trade_metrics = st.columns(4)
@@ -409,6 +424,21 @@ def _render_backtests(
         trade_metrics[2].metric("Best trade", format_number(pnl.max()))
         trade_metrics[3].metric("Worst trade", format_number(pnl.min()))
         st.plotly_chart(build_trade_pnl_chart(trades), use_container_width=True)
+
+    overlay_bars = queries.load_market_bars(
+        database_path,
+        str(selected_run["symbol"]),
+        str(selected_run["asset_class"]),
+        str(selected_run["timeframe"]),
+        _date_filter_from_value(selected_run.get("start")),
+        _date_filter_from_value(selected_run.get("end"), include_next_day=True),
+    )
+    if not overlay_bars.empty:
+        st.subheader("Trade Overlay")
+        st.plotly_chart(
+            build_trade_overlay_chart(overlay_bars, trades),
+            use_container_width=True,
+        )
 
     st.subheader("Trades")
     st.dataframe(trades, use_container_width=True)
@@ -444,6 +474,17 @@ def _date_text(value: object) -> str:
     if hasattr(value, "date"):
         return str(value.date())
     return str(value)
+
+
+def _date_filter_from_value(value: object, include_next_day: bool = False) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    timestamp = pd.to_datetime(value, errors="coerce")
+    if pd.isna(timestamp):
+        return None
+    if include_next_day:
+        timestamp = timestamp + timedelta(days=1)
+    return timestamp.isoformat()
 
 
 def main() -> None:

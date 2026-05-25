@@ -94,7 +94,8 @@ trading-dashboard --server.port 8501
 
 The dashboard reads the SQLite database configured by `DATABASE_PATH` and
 includes overview metrics, signal history, candlestick charts with indicators,
-and backtest run/trade tables.
+backtest run/trade tables, equity curves, drawdown charts, trade PnL, and
+trade entry/exit overlays.
 
 Run the test suite:
 
@@ -125,5 +126,6 @@ The CLI initializes SQLite automatically and stores:
 - `signals`: alert decisions with reason, feature snapshot, and optional order id
 - `backtest_runs`: summary metrics and full stats JSON
 - `backtest_trades`: Backtesting.py trade rows linked to a backtest run
+- `backtest_equity_curve`: equity and drawdown rows linked to a backtest run
 
 The `data/` directory is ignored by git.

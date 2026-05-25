@@ -1,6 +1,12 @@
 from datetime import UTC, datetime, timedelta
 
-from trading_pipeline.dashboard.charts import build_market_chart, build_trade_pnl_chart
+from trading_pipeline.dashboard.charts import (
+    build_drawdown_chart,
+    build_equity_curve_chart,
+    build_market_chart,
+    build_trade_overlay_chart,
+    build_trade_pnl_chart,
+)
 from trading_pipeline.dashboard import queries
 from trading_pipeline.domain import AssetClass, Bar
 from trading_pipeline.features import compute_feature_frame, latest_snapshot, snapshot_from_frame
@@ -83,3 +89,50 @@ def test_build_trade_pnl_chart_returns_bar_trace():
 
     assert len(figure.data) == 1
     assert figure.data[0].name == "PnL"
+
+
+def test_build_equity_and_drawdown_charts_return_figures():
+    import pandas as pd
+
+    equity_curve = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+            "equity": [10_000, 10_500],
+            "drawdown_pct": [0.0, -1.0],
+        }
+    )
+
+    equity = build_equity_curve_chart(equity_curve)
+    drawdown = build_drawdown_chart(equity_curve)
+
+    assert equity.data[0].name == "Equity"
+    assert drawdown.data[0].name == "Drawdown"
+
+
+def test_build_trade_overlay_chart_returns_entry_exit_markers():
+    import pandas as pd
+
+    bars = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+            "open": [100, 101],
+            "high": [102, 103],
+            "low": [99, 100],
+            "close": [101, 102],
+            "volume": [1000, 1000],
+        }
+    )
+    trades = pd.DataFrame(
+        {
+            "entry_time": pd.to_datetime(["2026-01-01"]),
+            "exit_time": pd.to_datetime(["2026-01-02"]),
+            "entry_price": [100.5],
+            "exit_price": [102.0],
+            "pnl": [1.5],
+        }
+    )
+
+    figure = build_trade_overlay_chart(bars, trades)
+
+    assert any(trace.name == "Entry" for trace in figure.data)
+    assert any(trace.name == "Exit" for trace in figure.data)

@@ -78,3 +78,7 @@ def test_storage_persists_backtest_run_and_trades(tmp_path):
             "SELECT COUNT(*) FROM backtest_trades WHERE backtest_run_id = ?",
             (run_id,),
         ).fetchone()[0] == len(result.trades)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM backtest_equity_curve WHERE backtest_run_id = ?",
+            (run_id,),
+        ).fetchone()[0] == len(result.equity_curve)

@@ -122,8 +122,11 @@ def test_load_bars_features_and_backtests(tmp_path):
     features = queries.load_feature_snapshots(db_path, "TEST", "stock", "1Day")
     runs = queries.load_backtest_runs(db_path, symbol="TEST")
     trades = queries.load_backtest_trades(db_path, int(runs.iloc[0]["id"]))
+    equity_curve = queries.load_backtest_equity_curve(db_path, int(runs.iloc[0]["id"]))
 
     assert len(bars) == 90
     assert len(features) == 90
     assert len(runs) == 1
     assert len(trades) >= 0
+    assert not equity_curve.empty
+    assert {"timestamp", "equity", "drawdown_pct"}.issubset(equity_curve.columns)
