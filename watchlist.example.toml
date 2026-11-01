@@ -1,0 +1,22 @@
+# Copy to watchlist.toml (or point WATCHLIST_PATH / --watchlist at your file).
+# Each [[watch]] entry is one strategy instance: symbol + asset class + timeframe.
+# With paper orders enabled, a symbol may appear only once (one paper position per symbol).
+
+[defaults]
+limit = 250        # bars to fetch; the strategy needs at least 60 closed bars
+notional = 100     # USD per paper order (ignored in alerts-only mode)
+asset_class = "stock"
+
+[[watch]]
+symbol = "AAPL"
+timeframe = "1Day"
+
+[[watch]]
+symbol = "MSFT"
+timeframe = "1Day"
+
+[[watch]]
+symbol = "BTC/USD"
+asset_class = "crypto"
+timeframe = "1Hour"
+notional = 50

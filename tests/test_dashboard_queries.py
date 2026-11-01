@@ -130,3 +130,54 @@ def test_load_bars_features_and_backtests(tmp_path):
     assert len(trades) >= 0
     assert not equity_curve.empty
     assert {"timestamp", "equity", "drawdown_pct"}.issubset(equity_curve.columns)
+
+
+def _simulate_alerts(db_path):
+    from fakes import FakeBroker, RecordingNotifier, after_close, crash_bar, crossover_bars
+    from trading_pipeline.pipeline import run_once
+
+    storage = Storage(db_path)
+    storage.initialize()
+    bars = crossover_bars()
+    broker = FakeBroker(bars)
+    for _ in range(2):
+        run_once(
+            broker, RecordingNotifier(), "TEST", AssetClass.STOCK, "1Day", 500, False, 100,
+            storage, now=after_close(bars),
+        )
+        bars.append(crash_bar(bars[-1]))
+    storage.record_run("TEST", AssetClass.STOCK, "1Day", bars[-1].timestamp, "boom")
+    return storage
+
+
+def test_load_decisions_positions_and_status(tmp_path):
+    db_path = tmp_path / "alerts.sqlite3"
+    _simulate_alerts(db_path)
+
+    decisions = queries.load_decisions(db_path)
+    positions = queries.load_positions(db_path)
+    status = queries.load_symbol_status(db_path)
+    overview = queries.load_overview(db_path)
+
+    assert list(decisions["decision"]) == ["exit_long", "enter_long"]
+    assert set(decisions["notification"]) == {"sent"}
+    assert len(positions) == 1 and positions.iloc[0]["status"] == "closed"
+    assert positions.iloc[0]["pnl_pct"] < 0
+    assert status.iloc[0]["health"] == "error"
+    assert overview["open_positions"] == 0
+    assert overview["latest_decision"]["decision"] == "exit_long"
+
+
+def test_market_chart_draws_decisions_and_position_levels(tmp_path):
+    from trading_pipeline.dashboard.charts import build_market_chart
+
+    db_path = tmp_path / "alerts.sqlite3"
+    _simulate_alerts(db_path)
+    figure = build_market_chart(
+        bars=queries.load_market_bars(db_path, "TEST", "stock", "1Day"),
+        features=queries.load_feature_snapshots(db_path, "TEST", "stock", "1Day"),
+        signals=queries.load_signals(db_path, "TEST", "stock", "1Day"),
+        positions=queries.load_positions(db_path, symbol="TEST"),
+    )
+    names = {trace.name for trace in figure.data}
+    assert {"ENTER (alert)", "EXIT (alert)", "Entry", "Stop", "Target"}.issubset(names)

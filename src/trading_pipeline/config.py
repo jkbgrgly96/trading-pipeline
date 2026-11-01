@@ -6,9 +6,33 @@ from pathlib import Path
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
-    if value is None or value == "":
+    if value is None or value.strip() == "":
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def parse_env_line(raw_line: str) -> tuple[str, str] | None:
+    """Parse one ``KEY=value`` line; supports quotes and trailing ``# comments``."""
+    line = raw_line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    if line.startswith("export "):
+        line = line[len("export ") :].lstrip()
+    key, value = line.split("=", 1)
+    key = key.strip()
+    value = value.strip()
+    if value[:1] in {'"', "'"}:
+        quote = value[0]
+        end = value.find(quote, 1)
+        value = value[1:end] if end != -1 else value[1:]
+    else:
+        # Unquoted: an inline comment starts at " #" (a bare "#" may be part
+        # of a value, e.g. a URL fragment).
+        comment = value.find(" #")
+        if comment != -1:
+            value = value[:comment]
+        value = value.strip()
+    return key, value
 
 
 def load_env_file(path: str = ".env") -> None:
@@ -17,13 +41,10 @@ def load_env_file(path: str = ".env") -> None:
         return
 
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
+        parsed = parse_env_line(raw_line)
+        if parsed:
+            key, value = parsed
+            os.environ.setdefault(key, value)
 
 
 @dataclass(frozen=True)
@@ -42,9 +63,12 @@ class Settings:
     default_bar_limit: int = 250
     default_notional: float = 100.0
     database_path: str = "data/trading_pipeline.sqlite3"
+    watchlist_path: str = "watchlist.toml"
+    notify_hold: bool = False
 
     @property
     def orders_enabled(self) -> bool:
+        """Paper orders only. All three switches must be set explicitly."""
         return self.alpaca_paper and self.trading_mode == "paper" and self.place_orders
 
 
@@ -65,4 +89,6 @@ def load_settings() -> Settings:
         default_bar_limit=int(os.getenv("DEFAULT_BAR_LIMIT", "250")),
         default_notional=float(os.getenv("DEFAULT_NOTIONAL", "100")),
         database_path=os.getenv("DATABASE_PATH", "data/trading_pipeline.sqlite3"),
+        watchlist_path=os.getenv("WATCHLIST_PATH", "watchlist.toml"),
+        notify_hold=_as_bool(os.getenv("NOTIFY_HOLD"), False),
     )
