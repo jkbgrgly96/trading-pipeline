@@ -158,9 +158,9 @@ uv run python -m pytest -q
 uv run ruff check src tests
 ```
 
-Tests use a fake broker and notifier, never the network. To run both on every
-push, add `.github/workflows/ci.yml` (`uv sync --extra dev`, then the two
-commands above).
+Tests use a fake broker and notifier, never the network. GitHub Actions
+(`.github/workflows/ci.yml`) runs both on every push to `main` and on every
+pull request, on Python 3.11 and 3.13.
 
 ## Storage
 

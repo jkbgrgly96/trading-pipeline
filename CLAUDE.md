@@ -17,7 +17,7 @@ a Streamlit dashboard.
 ```bash
 uv sync --extra dev                      # install
 uv run python -m pytest -q               # all tests (fast, offline)
-uv run ruff check src tests              # lint
+uv run ruff check src tests              # lint (CI runs both)
 uv run trading-pipeline --once           # one pass over watchlist.toml
 uv run trading-pipeline --watch          # continuous alerts
 uv run trading-pipeline --backtest ...   # backtest
