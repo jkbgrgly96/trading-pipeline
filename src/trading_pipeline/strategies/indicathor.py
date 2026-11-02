@@ -3,11 +3,12 @@
 Two flags, each -2..+2:
 
 * RSI flag (level): <= 30 -> -2, < 50 -> -1, > 50 -> +1, >= 70 -> +2.
-* MACD flag. ``state`` (default): above its signal line and above zero -> +2,
-  above the signal only -> +1, below the signal -> -1, below and under zero -> -2.
-  ``cross``: the original event flag (+1 after a bullish cross below zero,
-  -1 after a bearish cross above zero, 0 after a cross on the "wrong" side of
-  zero, otherwise unchanged).
+* MACD flag. ``cross`` (default): the original event flag (+1 after a bullish
+  cross below zero, -1 after a bearish cross above zero, 0 after a cross on the
+  "wrong" side of zero, otherwise unchanged). ``state``: above its signal line
+  and above zero -> +2, above the signal only -> +1, below the signal -> -1,
+  below and under zero -> -2. In the 2021-2023 / 2024-2026 sweep, ``cross``
+  traded far less but had the better and steadier profit per trade.
 
 score = w_macd * MACD flag + w_rsi * RSI flag, smoothed with an EMA.
 
@@ -51,7 +52,7 @@ class IndicathorStrategy(Strategy):
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
-    macd_flag_mode: str = "state"  # "state" | "cross"
+    macd_flag_mode: str = "cross"  # "cross" | "state"
     w_rsi: float = 1.0
     w_macd: float = 1.0
     score_ema: int = 5

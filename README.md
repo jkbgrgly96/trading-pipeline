@@ -299,9 +299,10 @@ Registered strategies (all long-only; parameters are the dataclass fields):
   pipeline rather than a production strategy: SMA 20/50 crossover, RSI 14
   filter, candlestick confirmation, fixed −4 %/+8 % stop/target.
 - `indicathor`: a momentum score from an RSI flag (≤30 −2, <50 −1, >50 +1,
-  ≥70 +2) and a MACD flag (`macd_flag_mode="state"`: above/below its signal
-  line, ±2 when also on that side of zero; `"cross"`: the original crossover
-  events), smoothed with an EMA. Entry when the score is ≥ `entry_score` with
+  ≥70 +2) and a MACD flag (`macd_flag_mode="cross"`, the default: the original
+  crossover events, +1 after a bullish cross below zero, −1 after a bearish
+  cross above zero; `"state"`: above/below its signal line, ±2 when also on
+  that side of zero), smoothed with an EMA. Entry when the score is ≥ `entry_score` with
   both flags positive and the trend filter (close above EMA 200, or EMA 50
   above EMA 200), ADX and optional relative-volume / relative-strength (vs SPY)
   filters agree. Exit when the score drops below `exit_score`, both flags are

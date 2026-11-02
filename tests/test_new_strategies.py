@@ -177,6 +177,10 @@ def test_indicathor_rejects_bad_parameters(params):
         get_strategy("indicathor", params)
 
 
+def test_indicathor_defaults_to_the_crossover_macd_flag():
+    assert IndicathorStrategy().macd_flag_mode == "cross"
+
+
 def test_indicathor_min_bars_follows_its_filters():
     assert IndicathorStrategy().min_bars == 210
     assert IndicathorStrategy(trend_filter="none").min_bars == 45
@@ -248,7 +252,7 @@ def test_donchian_rejects_an_exit_channel_longer_than_the_entry():
     ("name", "params"),
     [
         ("indicathor", {}),
-        ("indicathor", {"macd_flag_mode": "cross", "trend_filter": "cross", "stop_trigger": "close"}),
+        ("indicathor", {"macd_flag_mode": "state", "trend_filter": "cross", "stop_trigger": "close"}),
         ("rsi2_pullback", {"max_hold_bars": 5}),
         ("donchian_breakout", {}),
     ],
