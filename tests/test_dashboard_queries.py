@@ -3,9 +3,9 @@ from datetime import UTC, datetime, timedelta
 from trading_pipeline.backtest.runner import BacktestConfig, run_strategy_backtest
 from trading_pipeline.dashboard import queries
 from trading_pipeline.domain import AssetClass, Bar
-from trading_pipeline.features import compute_feature_frame, latest_snapshot, snapshot_from_frame
+from trading_pipeline.features import compute_feature_frame, latest_snapshot, snapshots_from_frame
 from trading_pipeline.storage import Storage
-from trading_pipeline.strategies.sma_rsi import generate_signal_from_features
+from trading_pipeline.strategies import History, SmaRsiStrategy
 
 
 def make_bars(count: int = 90) -> list[Bar]:
@@ -28,12 +28,7 @@ def seed_database(path):
     storage.initialize()
     bars = make_bars()
     frame = compute_feature_frame(bars)
-    signal = generate_signal_from_features(
-        "TEST",
-        AssetClass.STOCK,
-        latest_snapshot(frame),
-        snapshot_from_frame(frame, -2),
-    )
+    signal = SmaRsiStrategy().signal("TEST", AssetClass.STOCK, History(snapshots_from_frame(frame)))
     storage.save_market_bars("TEST", AssetClass.STOCK, "1Day", bars)
     storage.save_feature_snapshots("TEST", AssetClass.STOCK, "1Day", frame)
     storage.save_signal(

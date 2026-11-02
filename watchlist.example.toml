@@ -6,6 +6,7 @@
 limit = 250        # bars to fetch; the strategy needs at least 60 closed bars
 notional = 100     # USD per paper order (ignored in alerts-only mode)
 asset_class = "stock"
+strategy = "sma_rsi"  # any entry can override it with its own strategy = "..."
 
 [[watch]]
 symbol = "AAPL"

@@ -54,3 +54,13 @@ def test_telegram_without_credentials_exits(env, monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     with pytest.raises(SystemExit):
         cli.main(["--once", "--telegram"])
+
+
+def test_unknown_strategy_is_rejected(env):
+    with pytest.raises(SystemExit):
+        cli.main(["--once", "--strategy", "nope"])
+
+
+def test_once_reports_the_strategy_in_the_alert(env, capsys):
+    cli.main(["--once", "--symbol", "TEST", "--strategy", "sma_rsi"])
+    assert "sma_rsi" in capsys.readouterr().out

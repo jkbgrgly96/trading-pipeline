@@ -60,6 +60,7 @@ class Settings:
     default_symbol: str = "AAPL"
     default_asset_class: str = "stock"
     default_timeframe: str = "1Day"
+    default_strategy: str = "sma_rsi"
     default_bar_limit: int = 250
     default_notional: float = 100.0
     database_path: str = "data/trading_pipeline.sqlite3"
@@ -86,6 +87,7 @@ def load_settings() -> Settings:
         default_symbol=os.getenv("DEFAULT_SYMBOL", "AAPL"),
         default_asset_class=os.getenv("DEFAULT_ASSET_CLASS", "stock"),
         default_timeframe=os.getenv("DEFAULT_TIMEFRAME", "1Day"),
+        default_strategy=os.getenv("DEFAULT_STRATEGY", "sma_rsi").strip(),
         default_bar_limit=int(os.getenv("DEFAULT_BAR_LIMIT", "250")),
         default_notional=float(os.getenv("DEFAULT_NOTIONAL", "100")),
         database_path=os.getenv("DATABASE_PATH", "data/trading_pipeline.sqlite3"),

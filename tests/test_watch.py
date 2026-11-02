@@ -129,3 +129,39 @@ def test_watcher_survives_storage_errors(tmp_path, monkeypatch):
     )
     watcher.run_forever(max_cycles=3)  # must not raise
     assert notifier.messages[-1] == "⏹️ Watcher stopped."
+
+
+def test_watchlist_strategy_defaults_and_per_entry_override(tmp_path, monkeypatch):
+    from trading_pipeline import strategies
+    from trading_pipeline.strategies import SmaRsiStrategy
+
+    monkeypatch.setitem(strategies.STRATEGIES, "fast_sma", lambda: SmaRsiStrategy(fast=10, slow=30))
+    path = tmp_path / "watchlist.toml"
+    path.write_text(
+        """
+[defaults]
+strategy = "fast_sma"
+
+[[watch]]
+symbol = "AAPL"
+
+[[watch]]
+symbol = "MSFT"
+strategy = "sma_rsi"
+""",
+        encoding="utf-8",
+    )
+    items = load_watchlist(path, default_limit=250, default_notional=100)
+    assert [item.strategy for item in items] == ["fast_sma", "sma_rsi"]
+
+
+def test_watchlist_rejects_unknown_strategy(tmp_path):
+    path = tmp_path / "watchlist.toml"
+    path.write_text('[[watch]]\nsymbol = "AAPL"\nstrategy = "nope"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="Unknown strategy 'nope'"):
+        load_watchlist(path, default_limit=250, default_notional=100)
+
+
+def test_limit_below_strategy_min_bars_is_rejected():
+    with pytest.raises(ValueError, match="needs"):
+        validate_watchlist([WatchItem("AAPL", AssetClass.STOCK, "1Day", limit=50)], orders_enabled=False)

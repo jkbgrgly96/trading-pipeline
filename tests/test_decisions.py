@@ -12,7 +12,7 @@ from trading_pipeline.domain import (
     SignalAction,
 )
 from trading_pipeline.features import FeatureSnapshot
-from trading_pipeline.strategies.sma_rsi import generate_signal_from_features
+from trading_pipeline.strategies import History, SmaRsiStrategy
 
 TS = datetime(2026, 3, 2, tzinfo=UTC)
 
@@ -96,11 +96,12 @@ def test_hold_while_long_keeps_position():
 def test_strategy_rules(prev, latest, rsi, expected):
     previous = snap(sma_20=prev[0], sma_50=prev[1], rsi_14=50)
     current = snap(sma_20=latest[0], sma_50=latest[1], rsi_14=rsi)
-    assert generate_signal_from_features("T", AssetClass.STOCK, current, previous).action == expected
+    result = SmaRsiStrategy().signal("T", AssetClass.STOCK, History([previous, current]))
+    assert result.action == expected
 
 
 def test_strategy_holds_without_indicator_data():
-    result = generate_signal_from_features("T", AssetClass.STOCK, snap(), snap())
+    result = SmaRsiStrategy().signal("T", AssetClass.STOCK, History([snap(), snap()]))
     assert result.reason == "insufficient_indicator_data"
 
 

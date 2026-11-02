@@ -31,11 +31,12 @@ Tests never hit the network. Use `tests/fakes.py` (`FakeBroker`,
 ## Flow (per symbol, per closed bar)
 
 `watch.Watcher.run_cycle` → `flush_outbox` → `pipeline.run_once` per watchlist item:
-1. `broker.get_bars` → `timeframes.closed_bars` (drop the forming bar) → need ≥ `MIN_BARS`.
+1. `broker.get_bars` → `timeframes.closed_bars` (drop the forming bar) → need ≥ `strategy.min_bars`.
 2. `_pending_indexes`: every closed bar after `storage.last_processed_bar` (first run: latest bar
    only; catch-up capped at `MAX_CATCH_UP_BARS`). Nothing pending → `already_processed`.
-3. Features computed once over all closed bars; then for each pending bar, oldest first (`_process_bar`):
-   `_current_position` (paper reconciliation) → `generate_signal_from_features` → `decide` →
+3. Features (`strategy.feature_definitions()`) computed once over all closed bars; then for each pending
+   bar, oldest first (`_process_bar`): `_current_position` (paper reconciliation) →
+   `strategy.signal(History)` → `decide` →
    `save_signal` (unique per bar, stores the message = outbox) → `_apply_decision` → `deliver`.
 4. Undelivered alerts are retried by `flush_outbox` for `OUTBOX_MAX_AGE`, then reported as dropped.
 
@@ -48,12 +49,12 @@ Tests never hit the network. Use `tests/fakes.py` (`FakeBroker`,
 | `config.py` | `Settings` from env + `.env` loader; `orders_enabled` safety gate |
 | `brokers/base.py`, `brokers/alpaca.py` | `Broker` ABC (bars, position, buy, close, order status) and the paper-only Alpaca adapter |
 | `features/` | `IndicatorDefinition` list → `compute_feature_frame` (pandas-ta-classic) → `FeatureSnapshot`; `snapshots_from_frame` for bulk |
-| `strategies/sma_rsi.py` | Signal rules and risk constants (`MIN_BARS`, `STOP_LOSS_PCT`, `TAKE_PROFIT_PCT`, `risk_levels`) |
+| `strategies/` | `base.py`: `Strategy` ABC (`features`, `min_bars`, `signal`, `risk_levels`) and `History` (look-ahead-free view); `__init__.py`: `STRATEGIES` registry, `get_strategy`; `sma_rsi.py`: `SmaRsiStrategy` (default) |
 | `decisions.py` | `decide()`: the single source of truth for entries/exits (live + backtest) |
 | `pipeline.py` | `run_once`, `deliver`, `flush_outbox`, position reconciliation, order application |
 | `watch.py` | Watchlist TOML loading/validation, `Watcher` loop, error alerts with cooldown |
 | `notifications/` | `Notifier.send_message`, `MultiNotifier`, console, Telegram, `formatting.format_decision` |
-| `backtest/runner.py` | Backtesting.py strategy wrapping `decide()`; `default_costs` |
+| `backtest/runner.py` | Backtesting.py strategy wrapping `BacktestConfig.strategy` + `decide()`; `default_costs` |
 | `storage/database.py` | SQLite schema, versioned migrations (`PRAGMA user_version`), all writes |
 | `dashboard/` | Streamlit app (`app.py`), read-only SQL (`queries.py`), Plotly figures (`charts.py`) |
 
@@ -64,8 +65,12 @@ Tests never hit the network. Use `tests/fakes.py` (`FakeBroker`,
 - Feature frame columns: OHLCV capitalised (`Open`…`Volume`, required by Backtesting.py);
   indicators use `IndicatorDefinition.name`; candle patterns are `pattern__<name>` and become
   `bullish_<name>` / `bearish_<name>` in snapshots.
-- Strategies read features only through `FeatureSnapshot`. New feature → add the definition to
-  `DEFAULT_FEATURES` and a property on `FeatureSnapshot`.
+- Strategies read features only through `History` / `FeatureSnapshot.get(name)`, never the frame.
+  A strategy lists the indicators it needs in `features`; `DEFAULT_FEATURES` are always computed
+  because the dashboard chart draws them. Same name with different settings is an error.
+- New strategy: frozen dataclass subclassing `Strategy` (parameters as fields, stateless), registered
+  in `strategies.STRATEGIES`, with tests. It only returns signals; never put position or order logic
+  in a strategy.
 - **Never fork entry/exit logic between live and backtest.** Change `decisions.decide` (and its
   tests) instead. Exits are evaluated on the closed bar's high/low, matching what an alert can do.
 - Timestamps are stored as ISO-8601 TEXT in UTC via `storage.database.iso_timestamp`. Use it for
@@ -95,3 +100,5 @@ Tests never hit the network. Use `tests/fakes.py` (`FakeBroker`,
 - Stop/target are checked on bar close (alert semantics), not as resting broker orders. They are
   never checked against the bar a position was opened or adopted on.
 - Signals stored before schema v2 have no virtual positions, so their exits are not tracked.
+- One strategy per symbol/asset class/timeframe (signals and positions are keyed by those).
+  Changing an entry's strategy hands its open position to the new one, with the stored stop/target.
