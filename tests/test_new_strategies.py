@@ -95,8 +95,8 @@ def test_indicathor_entry_with_an_atr_stop():
 @pytest.mark.parametrize(
     ("strategy", "overrides", "blocked_by"),
     [
-        (IndicathorStrategy(), {"ema_200": 101.0}, "trend"),
-        (IndicathorStrategy(trend_filter="cross"), {"ema_50": 89.0}, "trend"),
+        (IndicathorStrategy(), {"ema_50": 89.0}, "trend"),  # default: EMA 50 above EMA 200
+        (IndicathorStrategy(trend_filter="close"), {"ema_200": 101.0}, "trend"),
         (IndicathorStrategy(), {"adx_14": 15.0}, "adx"),
         (IndicathorStrategy(rvol_min=1.5), {}, "volume"),
         (IndicathorStrategy(use_rs=True), {RELATIVE_STRENGTH: -3.0}, "relative_strength"),
@@ -182,8 +182,8 @@ def test_indicathor_defaults_to_the_crossover_macd_flag():
 
 
 def test_indicathor_min_bars_follows_its_filters():
-    assert IndicathorStrategy().min_bars == 210
-    assert IndicathorStrategy(trend_filter="none").min_bars == 45
+    assert IndicathorStrategy().min_bars == 215
+    assert IndicathorStrategy(trend_filter="none").min_bars == 50
 
 
 # --- rsi2_pullback ------------------------------------------------------------------------------

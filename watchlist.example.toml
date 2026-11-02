@@ -4,7 +4,7 @@
 # Only US-listed stocks/ETFs and Alpaca crypto pairs have data here.
 
 [defaults]
-limit = 300        # bars to fetch; must cover the strategy's min_bars (indicathor: 210)
+limit = 300        # bars to fetch; must cover the strategy's min_bars (indicathor: 215)
 asset_class = "stock"
 timeframe = "1Day"
 strategy = "sma_rsi"  # any entry can override it with its own strategy = "..."

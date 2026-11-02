@@ -315,9 +315,10 @@ Registered strategies (all long-only; parameters are the dataclass fields):
   crossover events, +1 after a bullish cross below zero, −1 after a bearish
   cross above zero; `"state"`: above/below its signal line, ±2 when also on
   that side of zero), smoothed with an EMA. Entry when the score is ≥ `entry_score` with
-  both flags positive and the trend filter (close above EMA 200, or EMA 50
-  above EMA 200), ADX and optional relative-volume / relative-strength (vs SPY)
-  filters agree. Exit when the score drops below `exit_score`, both flags are
+  both flags positive and the trend filter (EMA 50 above EMA 200 by default,
+  or close above EMA 200), ADX and optional relative-volume / relative-strength
+  (vs SPY) filters agree. The score EMA is 10 bars by default; both defaults
+  came out of the multi-period sweep. Exit when the score drops below `exit_score`, both flags are
   ≤ 0, or the ATR stop is hit; the stop starts 2× ATR(14) below the entry and
   trails at 3× ATR(10) under the highest high of the last 20 bars since entry.
 - `rsi2_pullback`: buy when the close is above its SMA 200 and RSI(2) < 10;
