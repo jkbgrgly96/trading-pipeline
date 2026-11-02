@@ -52,7 +52,7 @@ class Settings:
     alpaca_api_key: str
     alpaca_secret_key: str
     alpaca_paper: bool = True
-    alpaca_stock_feed: str = "iex"
+    alpaca_stock_feed: str = "sip"
     alpaca_adjustment: str = "split"
     trading_mode: str = "alerts_only"
     place_orders: bool = False
@@ -64,6 +64,11 @@ class Settings:
     default_strategy: str = "sma_rsi"
     default_bar_limit: int = 250
     default_notional: float = 100.0
+    # Entry sizing: "risk" (risk_per_trade to the stop, capped at max_notional)
+    # or "notional" (default_notional per entry).
+    sizing: str = "risk"
+    risk_per_trade: float = 10.0
+    max_notional: float = 1_000.0
     database_path: str = "data/trading_pipeline.sqlite3"
     watchlist_path: str = "watchlist.toml"
     notify_hold: bool = False
@@ -82,7 +87,7 @@ def load_settings() -> Settings:
         alpaca_api_key=os.getenv("ALPACA_API_KEY", ""),
         alpaca_secret_key=os.getenv("ALPACA_SECRET_KEY", ""),
         alpaca_paper=_as_bool(os.getenv("ALPACA_PAPER"), True),
-        alpaca_stock_feed=os.getenv("ALPACA_STOCK_FEED", "iex").strip().lower(),
+        alpaca_stock_feed=os.getenv("ALPACA_STOCK_FEED", "sip").strip().lower(),
         alpaca_adjustment=os.getenv("ALPACA_ADJUSTMENT", "split").strip().lower(),
         trading_mode=os.getenv("TRADING_MODE", "alerts_only").strip().lower(),
         place_orders=_as_bool(os.getenv("PLACE_ORDERS"), False),
@@ -94,6 +99,9 @@ def load_settings() -> Settings:
         default_strategy=os.getenv("DEFAULT_STRATEGY", "sma_rsi").strip(),
         default_bar_limit=int(os.getenv("DEFAULT_BAR_LIMIT", "250")),
         default_notional=float(os.getenv("DEFAULT_NOTIONAL", "100")),
+        sizing=os.getenv("SIZING", "risk").strip().lower(),
+        risk_per_trade=float(os.getenv("RISK_PER_TRADE", "10")),
+        max_notional=float(os.getenv("MAX_NOTIONAL", "1000")),
         database_path=os.getenv("DATABASE_PATH", "data/trading_pipeline.sqlite3"),
         watchlist_path=os.getenv("WATCHLIST_PATH", "watchlist.toml"),
         notify_hold=_as_bool(os.getenv("NOTIFY_HOLD"), False),

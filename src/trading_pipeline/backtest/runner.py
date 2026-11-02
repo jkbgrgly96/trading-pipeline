@@ -1,17 +1,25 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
 
 from trading_pipeline.brokers.base import Broker
-from trading_pipeline.decisions import decide
+from trading_pipeline.decisions import evaluate
 from trading_pipeline.domain import AssetClass, Bar, DecisionAction, OpenPosition
-from trading_pipeline.features import compute_feature_frame, snapshots_from_frame
+from trading_pipeline.features import snapshots_from_frame
 from trading_pipeline.features.frame import bars_to_ohlcv_frame
-from trading_pipeline.strategies import DEFAULT_STRATEGY, History, Strategy, get_strategy
+from trading_pipeline.sizing import Sizing, SizingMode
+from trading_pipeline.strategies import (
+    DEFAULT_STRATEGY,
+    History,
+    Strategy,
+    get_strategy,
+    strategy_frame,
+)
 from trading_pipeline.timeframes import closed_bars, parse_timeframe
 
 __all__ = [
@@ -41,12 +49,17 @@ class BacktestConfig:
     symbol: str
     asset_class: AssetClass
     strategy: str = DEFAULT_STRATEGY
+    strategy_params: Mapping[str, Any] = field(default_factory=dict)
     cash: float = 10_000.0
     commission: float = 0.0
     spread: float = 0.0
-    # USD per entry, like a paper order. Ignored when ``position_size`` is set.
+    # USD per entry, like a paper order (risk sizing: the amount used without a stop).
     notional: float = 100.0
-    # Fraction of current equity per entry (compounding). ``None``: use ``notional``.
+    # Risk sizing, like paper orders with SIZING=risk: risk_per_trade USD to the
+    # stop, capped at max_notional. ``None``: a fixed ``notional`` per entry.
+    risk_per_trade: float | None = None
+    max_notional: float = 1_000.0
+    # Fraction of current equity per entry (compounding); overrides the above.
     position_size: float | None = None
     trade_on_close: bool = False
     fractional_unit: float = 0.00000001
@@ -55,13 +68,25 @@ class BacktestConfig:
 
     @property
     def sizing(self) -> str:
-        return "notional" if self.position_size is None else "equity_fraction"
+        if self.position_size is not None:
+            return "equity_fraction"
+        return "notional" if self.risk_per_trade is None else "risk"
+
+    def sizing_rule(self) -> Sizing:
+        """The same rule paper orders use (not for equity-fraction sizing)."""
+        if self.risk_per_trade is None:
+            return Sizing(SizingMode.NOTIONAL, notional=self.notional)
+        return Sizing(SizingMode.RISK, self.notional, self.risk_per_trade, self.max_notional)
 
     def validate(self) -> None:
-        if self.position_size is not None and not 0 < self.position_size <= 1:
-            raise ValueError("position_size must be in (0, 1].")
-        if self.position_size is None and not 0 < self.notional <= self.cash:
-            raise ValueError(f"notional must be in (0, cash={self.cash:g}].")
+        if self.position_size is not None:
+            if not 0 < self.position_size <= 1:
+                raise ValueError("position_size must be in (0, 1].")
+            return
+        largest = self.notional if self.risk_per_trade is None else max(self.notional, self.max_notional)
+        if not 0 < largest <= self.cash:
+            raise ValueError(f"notional and max_notional must be in (0, cash={self.cash:g}].")
+        self.sizing_rule()  # validates the amounts
 
 
 @dataclass(frozen=True)
@@ -70,6 +95,8 @@ class BacktestResult:
     trades: pd.DataFrame
     equity_curve: pd.DataFrame
     feature_frame: pd.DataFrame
+    # Every parameter of the strategy that ran (defaults included).
+    strategy_params: Mapping[str, Any] = field(default_factory=dict)
 
 
 def fetch_backtest_bars(
@@ -99,12 +126,19 @@ def fetch_backtest_bars(
     return closed_bars(bars, parsed, now)
 
 
-def run_strategy_backtest(bars: list[Bar], config: BacktestConfig) -> BacktestResult:
+def run_strategy_backtest(
+    bars: list[Bar],
+    config: BacktestConfig,
+    benchmark_bars: list[Bar] | None = None,
+    chart_features: bool = True,
+) -> BacktestResult:
+    """``benchmark_bars``: closes of ``strategy.benchmark_for(...)`` over the same
+    period. ``chart_features=False`` skips the dashboard-only indicators."""
     from backtesting.lib import FractionalBacktest
 
     config.validate()
-    strategy = get_strategy(config.strategy)
-    feature_frame = compute_feature_frame(bars, strategy.feature_definitions())
+    strategy = get_strategy(config.strategy, config.strategy_params)
+    feature_frame = strategy_frame(strategy, bars, benchmark_bars, chart_features)
     first_tradable = _first_tradable_index(feature_frame.index, strategy.min_bars, config.start)
     # Backtesting.py calls ``next`` from its second row on, so the data starts
     # one bar early. Warm-up bars before that would only distort Buy & Hold,
@@ -130,6 +164,7 @@ def run_strategy_backtest(bars: list[Bar], config: BacktestConfig) -> BacktestRe
         trades=stats["_trades"],
         equity_curve=stats["_equity_curve"],
         feature_frame=feature_frame,
+        strategy_params=strategy.params(),
     )
 
 
@@ -185,11 +220,13 @@ def _build_strategy_class(
     # rebuilding a snapshot from ~75 columns on every step.
     snapshots = snapshots_from_frame(feature_frame)
 
-    def entry_size(price: float) -> float | None:
-        if config.position_size is not None:
+    sizing = None if config.position_size is not None else config.sizing_rule()
+
+    def entry_size(price: float, stop: float | None) -> float | None:
+        if sizing is None:
             return config.position_size
         # FractionalBacktest trades whole multiples of ``fractional_unit``.
-        units = int(config.notional / (price * config.fractional_unit))
+        units = int(sizing.entry_notional(price, stop) / (price * config.fractional_unit))
         return units if units >= 1 else None
 
     class PipelineStrategy(BacktestingStrategy):
@@ -205,14 +242,18 @@ def _build_strategy_class(
                 return
 
             latest = snapshots[index]
-            signal = strategy.signal(self.symbol, self.asset_class, History(snapshots, index + 1))
             if not self.position:
                 # Closed by the engine (e.g. finalize) or never filled.
                 self._open = None
 
-            decision = decide(signal, self._open, latest)
-            if decision.action == DecisionAction.ENTER_LONG and not self.position:
-                size = entry_size(latest.close)
+            decision = evaluate(
+                strategy, self.symbol, self.asset_class, History(snapshots, index + 1), self._open
+            )
+            if decision.action == DecisionAction.NONE and self._open is not None:
+                # A trailing stop moved up; it is checked from the next bar on.
+                self._open = replace(self._open, stop_loss=decision.stop_loss)
+            elif decision.action == DecisionAction.ENTER_LONG and not self.position:
+                size = entry_size(latest.close, decision.stop_loss)
                 if size is None:
                     return
                 self.buy(size=size)

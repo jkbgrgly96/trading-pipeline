@@ -5,16 +5,18 @@ from __future__ import annotations
 import logging
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from trading_pipeline.brokers.base import Broker
 from trading_pipeline.domain import AssetClass
 from trading_pipeline.notifications.base import Notifier
 from trading_pipeline.notifications.formatting import format_error
 from trading_pipeline.pipeline import InsufficientBarsError, flush_outbox, run_once, sync_order_fills
+from trading_pipeline.sizing import Sizing, SizingMode
 from trading_pipeline.storage import Storage
 from trading_pipeline.strategies import DEFAULT_STRATEGY, Strategy, get_strategy
 from trading_pipeline.timeframes import parse_timeframe
@@ -36,10 +38,33 @@ class WatchItem:
     limit: int = 250
     notional: float = 100.0
     strategy: str = DEFAULT_STRATEGY
+    # Strategy parameter overrides as sorted (name, value) pairs (hashable).
+    params: tuple[tuple[str, Any], ...] = ()
+    sizing_mode: str = SizingMode.NOTIONAL.value
+    risk_per_trade: float = 10.0
+    max_notional: float = 1_000.0
 
     @property
     def label(self) -> str:
         return f"{self.symbol} {self.timeframe} ({self.asset_class.value})"
+
+    @property
+    def strategy_params(self) -> dict[str, Any]:
+        return dict(self.params)
+
+    def build_strategy(self) -> Strategy:
+        return get_strategy(self.strategy, self.strategy_params)
+
+    @property
+    def sizing(self) -> Sizing:
+        return Sizing(SizingMode(self.sizing_mode), self.notional, self.risk_per_trade, self.max_notional)
+
+
+def freeze_params(params: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
+    for key, value in params.items():
+        if not isinstance(value, bool | int | float | str):
+            raise ValueError(f"Strategy parameter {key!r} must be a number, bool or string, got {value!r}.")
+    return tuple(sorted(params.items()))
 
 
 def load_watchlist(
@@ -47,18 +72,27 @@ def load_watchlist(
     default_limit: int,
     default_notional: float,
     default_strategy: str = DEFAULT_STRATEGY,
+    default_sizing: Sizing | None = None,
 ) -> list[WatchItem]:
     data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     defaults = data.get("defaults", {})
     limit = int(defaults.get("limit", default_limit))
     notional = float(defaults.get("notional", default_notional))
+    base_sizing = default_sizing or Sizing(notional=notional)
+    sizing_mode = str(defaults.get("sizing", base_sizing.mode.value))
+    risk_per_trade = float(defaults.get("risk_per_trade", base_sizing.risk_per_trade))
+    max_notional = float(defaults.get("max_notional", base_sizing.max_notional))
     strategy = str(defaults.get("strategy", default_strategy))
+    default_params = dict(defaults.get("params", {}))
     items = []
     for entry in data.get("watch", []):
         timeframe = str(entry.get("timeframe", defaults.get("timeframe", "1Day")))
         parse_timeframe(timeframe)  # fail fast on typos
         item_strategy = str(entry.get("strategy", strategy))
-        get_strategy(item_strategy)  # fail fast on unknown names
+        # [defaults] params belong to the default strategy; an entry that picks
+        # its own strategy only gets its own params.
+        params = {**(default_params if item_strategy == strategy else {}), **entry.get("params", {})}
+        get_strategy(item_strategy, params)  # fail fast on unknown names and bad params
         items.append(
             WatchItem(
                 symbol=str(entry["symbol"]),
@@ -67,8 +101,13 @@ def load_watchlist(
                 limit=int(entry.get("limit", limit)),
                 notional=float(entry.get("notional", notional)),
                 strategy=item_strategy,
+                params=freeze_params(params),
+                sizing_mode=str(entry.get("sizing", sizing_mode)),
+                risk_per_trade=float(entry.get("risk_per_trade", risk_per_trade)),
+                max_notional=float(entry.get("max_notional", max_notional)),
             )
         )
+        _ = items[-1].sizing  # fail fast on a bad sizing mode or amounts
     if not items:
         raise ValueError(f"No [[watch]] entries in {path}.")
     return items
@@ -81,7 +120,7 @@ def validate_watchlist(items: list[WatchItem], orders_enabled: bool) -> None:
         # so two strategies cannot share one.
         raise ValueError("Watchlist contains duplicate symbol/asset_class/timeframe entries.")
     for item in items:
-        min_bars = get_strategy(item.strategy).min_bars
+        min_bars = item.build_strategy().min_bars
         if item.limit < min_bars:
             raise ValueError(
                 f"{item.label}: limit {item.limit} is below the {min_bars} bars "
@@ -104,13 +143,17 @@ def default_interval(items: list[WatchItem]) -> timedelta:
     return max(MIN_INTERVAL, min(shortest, MAX_INTERVAL))
 
 
-def next_run_time(now: datetime, interval: timedelta) -> datetime:
-    """Next interval boundary (aligned to the epoch) plus the publish grace."""
+def next_run_time(now: datetime, interval: timedelta, delay: timedelta = timedelta(0)) -> datetime:
+    """Next interval boundary (aligned to the epoch) plus the publish grace.
+
+    ``delay`` is how long the data source holds back fresh bars (SIP on the
+    free plan): waking up earlier would only find the bar missing.
+    """
     epoch = datetime(1970, 1, 1, tzinfo=UTC)
     seconds = interval.total_seconds()
-    elapsed = (now - epoch).total_seconds()
+    elapsed = (now - epoch - delay).total_seconds()
     boundary = epoch + timedelta(seconds=(elapsed // seconds + 1) * seconds)
-    return boundary + BAR_PUBLISH_GRACE
+    return boundary + delay + BAR_PUBLISH_GRACE
 
 
 class Watcher:
@@ -130,9 +173,7 @@ class Watcher:
         if max_open_positions is not None and max_open_positions < 0:
             raise ValueError("max_open_positions must be >= 0 (0 or None: no limit).")
         self.max_open_positions = max_open_positions or None
-        self._strategies: dict[WatchItem, Strategy] = {
-            item: get_strategy(item.strategy) for item in items
-        }
+        self._strategies: dict[WatchItem, Strategy] = {item: item.build_strategy() for item in items}
         self.broker = broker
         self.storage = storage
         self.notifier = notifier
@@ -155,8 +196,9 @@ class Watcher:
                 sync_order_fills(self.storage, self.broker, now=self._clock())
             except Exception:  # noqa: BLE001 - fills are bookkeeping, never block alerts
                 logger.exception("Fill sync failed")
+        bar_cache: dict = {}  # benchmark bars fetched once per cycle
         for item in self.items:
-            outcomes[item.label] = self._run_item(item)
+            outcomes[item.label] = self._run_item(item, bar_cache)
         return outcomes
 
     def run_forever(self, interval: timedelta | None = None, max_cycles: int | None = None) -> None:
@@ -180,14 +222,17 @@ class Watcher:
                 cycles += 1
                 if max_cycles is not None and cycles >= max_cycles:
                     break
-                wake = next_run_time(self._clock(), interval)
+                wake = next_run_time(self._clock(), interval, self._data_delay())
                 self._sleep(max(0.0, (wake - self._clock()).total_seconds()))
         except KeyboardInterrupt:
             logger.info("Watcher stopped by user.")
         finally:
             self._safe_notify("⏹️ Watcher stopped.")
 
-    def _run_item(self, item: WatchItem) -> str:
+    def _data_delay(self) -> timedelta:
+        return max(self.broker.data_delay(item.asset_class) for item in self.items)
+
+    def _run_item(self, item: WatchItem, bar_cache: dict | None = None) -> str:
         try:
             result = run_once(
                 broker=self.broker,
@@ -203,6 +248,8 @@ class Watcher:
                 now=self._clock(),
                 strategy=self._strategies[item],
                 max_open_positions=self.max_open_positions,
+                bar_cache=bar_cache,
+                sizing=item.sizing,
             )
         except InsufficientBarsError as exc:
             logger.warning("%s", exc)

@@ -60,3 +60,42 @@ def test_snapshot_extracts_pattern_names_from_feature_frame():
     )
 
     assert "bullish_engulfing" in snapshot_from_frame(frame).patterns
+
+
+def test_new_indicator_kinds_produce_named_columns():
+    import pandas_ta_classic as ta
+
+    bars = make_bars(120)
+    frame = compute_feature_frame(
+        bars,
+        [
+            IndicatorDefinition("ema_10", "ema", {"length": 10}),
+            IndicatorDefinition("adx_14", "adx", {"length": 14}),
+            IndicatorDefinition("dc", "donchian", {"lower_length": 20, "upper_length": 55}),
+            IndicatorDefinition("stoch", "stoch", {"k": 14, "d": 3, "smooth_k": 3}),
+            IndicatorDefinition("natr_14", "natr", {"length": 14}),
+            IndicatorDefinition("rvol_20", "rvol", {"length": 20}),
+            IndicatorDefinition("roc_10", "roc", {"length": 10}),
+        ],
+    )
+    last = frame.iloc[-1]
+    for column in [
+        "ema_10", "adx_14", "adx_14_dmp", "adx_14_dmn", "dc_lower", "dc_middle", "dc_upper",
+        "stoch_k", "stoch_d", "natr_14", "rvol_20", "roc_10",
+    ]:
+        assert column in frame.columns and last[column] == last[column], column  # present, not NaN
+
+    ohlcv = bars_to_ohlcv_frame(bars)
+    assert last["ema_10"] == ta.ema(ohlcv["Close"], length=10).iloc[-1]
+    assert last["dc_upper"] == ohlcv["High"].iloc[-55:].max()  # includes the current bar
+    assert last["dc_lower"] == ohlcv["Low"].iloc[-20:].min()
+    assert last["rvol_20"] == ohlcv["Volume"].iloc[-1] / ohlcv["Volume"].iloc[-20:].mean()
+    assert 0 <= last["stoch_k"] <= 100
+    assert last["adx_14"] > 50  # a steady uptrend is a strong trend
+    assert last["adx_14_dmp"] > last["adx_14_dmn"]
+
+
+def test_relative_volume_is_nan_when_average_volume_is_zero():
+    bars = [Bar(b.timestamp, b.open, b.high, b.low, b.close, 0) for b in make_bars(30)]
+    frame = compute_feature_frame(bars, [IndicatorDefinition("rvol", "rvol", {"length": 5})])
+    assert frame["rvol"].iloc[-1] != frame["rvol"].iloc[-1]

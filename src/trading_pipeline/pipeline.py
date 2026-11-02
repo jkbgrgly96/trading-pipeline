@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 
 from trading_pipeline.brokers.base import DEAD_ORDER_STATUSES, Broker, is_order_open
-from trading_pipeline.decisions import decide
+from trading_pipeline.decisions import evaluate
 from trading_pipeline.domain import (
     AssetClass,
     Bar,
@@ -38,12 +38,19 @@ from trading_pipeline.domain import (
     OpenPosition,
     Signal,
 )
-from trading_pipeline.features import FeatureSnapshot, compute_feature_frame, snapshots_from_frame
+from trading_pipeline.features import FeatureSnapshot, snapshots_from_frame
 from trading_pipeline.notifications.base import Notifier
 from trading_pipeline.notifications.formatting import format_decision, format_info
+from trading_pipeline.sizing import Sizing
 from trading_pipeline.storage import Storage
 from trading_pipeline.storage.database import iso_timestamp
-from trading_pipeline.strategies import DEFAULT_STRATEGY, History, Strategy, get_strategy
+from trading_pipeline.strategies import (
+    DEFAULT_STRATEGY,
+    History,
+    Strategy,
+    get_strategy,
+    strategy_frame,
+)
 from trading_pipeline.timeframes import closed_bars, parse_timeframe
 
 logger = logging.getLogger(__name__)
@@ -88,6 +95,7 @@ class _Context:
     notify_hold: bool
     now: datetime
     max_open_positions: int | None
+    sizing: Sizing
 
 
 def run_once(
@@ -105,7 +113,11 @@ def run_once(
     now: datetime | None = None,
     strategy: Strategy | None = None,
     max_open_positions: int | None = None,
+    bar_cache: dict | None = None,
+    sizing: Sizing | None = None,
 ) -> PipelineResult:
+    """``bar_cache`` (one dict per watcher cycle) shares benchmark bars between symbols.
+    ``sizing`` defaults to a fixed ``notional`` per entry."""
     now = now or datetime.now(UTC)
     strategy = strategy or get_strategy(DEFAULT_STRATEGY)
     parsed = parse_timeframe(timeframe)
@@ -128,9 +140,15 @@ def run_once(
         storage.record_run(symbol, asset_class, timeframe, last_bar_time)
         return PipelineResult(status="already_processed", bar_timestamp=last_bar_time)
 
+    benchmark = strategy.benchmark_for(symbol, asset_class)
+    benchmark_bars = (
+        _cached_closed_bars(broker, benchmark, asset_class, timeframe, limit, now, bar_cache)
+        if benchmark
+        else None
+    )
     # Features are causal, so one frame over all closed bars gives the same
     # values per bar as computing each bar separately.
-    feature_frame = compute_feature_frame(bars, strategy.feature_definitions())
+    feature_frame = strategy_frame(strategy, bars, benchmark_bars)
     snapshots = snapshots_from_frame(feature_frame)
     storage.save_market_bars(symbol, asset_class, timeframe, bars, source=source)
     storage.save_feature_snapshots(symbol, asset_class, timeframe, feature_frame)
@@ -138,6 +156,7 @@ def run_once(
     context = _Context(
         broker, notifier, storage, strategy, symbol, asset_class, timeframe,
         orders_enabled, notional, notify_hold, now, max_open_positions,
+        sizing or Sizing(notional=notional),
     )
     result: PipelineResult | None = None
     for index in pending:
@@ -147,6 +166,25 @@ def run_once(
     storage.record_run(symbol, asset_class, timeframe, last_bar_time)
     assert result is not None
     return replace(result, bars_processed=len(pending))
+
+
+def _cached_closed_bars(
+    broker: Broker,
+    symbol: str,
+    asset_class: AssetClass,
+    timeframe: str,
+    limit: int,
+    now: datetime,
+    cache: dict | None,
+) -> list[Bar]:
+    key = (symbol, asset_class, timeframe, limit)
+    if cache is not None and key in cache:
+        return cache[key]
+    raw = broker.get_bars(symbol=symbol, asset_class=asset_class, timeframe=timeframe, limit=limit)
+    bars = closed_bars(raw, parse_timeframe(timeframe), now)
+    if cache is not None:
+        cache[key] = bars
+    return bars
 
 
 def _pending_indexes(
@@ -185,8 +223,15 @@ def _process_bar(context: _Context, history: History, late: bool) -> PipelineRes
     storage = context.storage
     latest = history.latest
     position = _current_position(context, latest)
-    signal = context.strategy.signal(context.symbol, context.asset_class, history)
-    decision = decide(signal, position, latest, entries_allowed=_entries_allowed(context, position))
+    decision = evaluate(
+        context.strategy,
+        context.symbol,
+        context.asset_class,
+        history,
+        position,
+        entries_allowed=_entries_allowed(context, position),
+    )
+    signal = decision.signal
     notify_required = decision.is_actionable or (context.notify_hold and not late)
 
     signal_id = storage.save_signal(
@@ -200,6 +245,7 @@ def _process_bar(context: _Context, history: History, late: bool) -> PipelineRes
         notify_required=notify_required,
         notify_message=_message(decision, context, "Paper order: pending", late),
         strategy=context.strategy.name,
+        strategy_params=context.strategy.params(),
     )
     if signal_id is None:
         # Another process claimed this bar between the check and the insert.
@@ -230,7 +276,12 @@ def _process_bar(context: _Context, history: History, late: bool) -> PipelineRes
 
 
 def _message(decision: Decision, context: _Context, order_line: str, late: bool) -> str:
-    text = format_decision(decision, context.timeframe, order_line, context.strategy.name)
+    size_text = (
+        context.sizing.describe(decision.price, decision.stop_loss)
+        if decision.action == DecisionAction.ENTER_LONG
+        else None
+    )
+    text = format_decision(decision, context.timeframe, order_line, context.strategy.name, size_text)
     if late:
         text = "(late: bar was missed, replayed now)\n" + text
     return text
@@ -356,6 +407,7 @@ def _current_position(context: _Context, latest: FeatureSnapshot) -> OpenPositio
             source="paper_adopted",
             quantity=remote.quantity,
             strategy=context.strategy.name,
+            strategy_params=context.strategy.params(),
         )
         _notify_best_effort(
             context.notifier,
@@ -402,6 +454,7 @@ def _apply_decision(
     storage, broker = context.storage, context.broker
     signal = decision.signal
     if decision.action == DecisionAction.ENTER_LONG:
+        notional = context.sizing.entry_notional(decision.price, decision.stop_loss)
         position_id = storage.open_position(
             symbol=signal.symbol,
             asset_class=signal.asset_class,
@@ -413,12 +466,14 @@ def _apply_decision(
             source="paper" if context.orders_enabled else "virtual",
             entry_signal_id=signal_id,
             strategy=context.strategy.name,
+            strategy_params=context.strategy.params(),
+            notional=notional,
         )
         storage.set_signal_position(signal_id, position_id)
         if not context.orders_enabled:
             return None, None
         try:
-            order_id = broker.submit_market_buy(signal.symbol, signal.asset_class, context.notional)
+            order_id = broker.submit_market_buy(signal.symbol, signal.asset_class, notional)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Paper buy for %s failed", signal.symbol)
             storage.update_signal_order(signal_id, None, "failed", str(exc))
@@ -460,6 +515,11 @@ def _apply_decision(
         )
         return order_id, None
 
+    position = decision.position
+    if position is not None and position.id is not None and decision.stop_loss != position.stop_loss:
+        # A trailing stop moved up; it is checked from the next bar on.
+        assert decision.stop_loss is not None
+        storage.update_position_stop(position.id, decision.stop_loss)
     return None, None
 
 

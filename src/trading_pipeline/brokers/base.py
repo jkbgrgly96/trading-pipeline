@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from trading_pipeline.domain import AssetClass, Bar
 
@@ -103,6 +103,10 @@ class Broker(ABC):
     def get_order_status(self, order_id: str) -> str:
         """Lower-case order status, e.g. ``new``, ``filled``, ``canceled``."""
         return self.get_order(order_id).status
+
+    def data_delay(self, asset_class: AssetClass) -> timedelta:
+        """How long after a bar closes its data can be fetched (on top of publishing)."""
+        return timedelta(0)
 
     def ensure_paper(self) -> None:
         if not self.is_paper:

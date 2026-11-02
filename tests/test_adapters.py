@@ -132,3 +132,29 @@ def test_alpaca_order_fill_details(monkeypatch, filled_qty, filled_avg_price, ex
         "partially_filled", expected_qty, expected_price,
     )
     assert broker.get_order_status("abc") == "partially_filled"
+
+
+def test_sip_requests_end_before_the_free_plan_delay(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from trading_pipeline.brokers.alpaca import SIP_DELAY
+
+    broker = AlpacaBroker("key", "secret", paper=False, stock_feed="sip")
+    requests = _capture_bar_requests(broker, monkeypatch)
+
+    broker.get_bars("AAPL", AssetClass.STOCK, "1Day", 10)
+    broker.get_bars("BTC/USD", AssetClass.CRYPTO, "1Hour", 10)
+
+    latest_allowed = (datetime.now(UTC) - SIP_DELAY).replace(tzinfo=None)
+    stock, crypto = requests
+    assert stock.end <= latest_allowed
+    assert crypto.end > latest_allowed  # crypto data is not delayed
+    assert broker.data_delay(AssetClass.STOCK) == SIP_DELAY
+    assert broker.data_delay(AssetClass.CRYPTO) == timedelta(0)
+
+
+def test_iex_requests_are_not_delayed():
+    from datetime import timedelta
+
+    broker = AlpacaBroker("key", "secret", paper=False, stock_feed="iex")
+    assert broker.data_delay(AssetClass.STOCK) == timedelta(0)

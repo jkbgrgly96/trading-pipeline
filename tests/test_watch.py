@@ -165,3 +165,42 @@ def test_watchlist_rejects_unknown_strategy(tmp_path):
 def test_limit_below_strategy_min_bars_is_rejected():
     with pytest.raises(ValueError, match="needs"):
         validate_watchlist([WatchItem("AAPL", AssetClass.STOCK, "1Day", limit=50)], orders_enabled=False)
+
+
+def test_next_run_time_waits_for_delayed_data():
+    delay = timedelta(minutes=16)
+    # The 14:00 bar becomes available at 14:16; a 14:07 wake-up would find nothing.
+    now = datetime(2026, 1, 5, 14, 7, 10, tzinfo=UTC)
+    assert next_run_time(now, timedelta(hours=1), delay) == datetime(2026, 1, 5, 14, 16, 20, tzinfo=UTC)
+    after = datetime(2026, 1, 5, 14, 16, 30, tzinfo=UTC)
+    assert next_run_time(after, timedelta(hours=1), delay) == datetime(2026, 1, 5, 15, 16, 20, tzinfo=UTC)
+
+
+def test_watchlist_params_merge_defaults_for_the_default_strategy_only(tmp_path):
+    path = tmp_path / "watchlist.toml"
+    path.write_text(
+        """
+[defaults]
+strategy = "sma_rsi"
+params = { fast = 10, slow = 30 }
+
+[[watch]]
+symbol = "AAPL"
+params = { slow = 40 }
+
+[[watch]]
+symbol = "MSFT"
+""",
+        encoding="utf-8",
+    )
+    aapl, msft = load_watchlist(path, default_limit=250, default_notional=100)
+    assert aapl.strategy_params == {"fast": 10, "slow": 40}
+    assert msft.strategy_params == {"fast": 10, "slow": 30}
+    assert aapl.build_strategy().slow == 40
+
+
+def test_watchlist_rejects_unknown_params(tmp_path):
+    path = tmp_path / "watchlist.toml"
+    path.write_text('[[watch]]\nsymbol = "AAPL"\nparams = { nope = 1 }\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="no parameter 'nope'"):
+        load_watchlist(path, default_limit=250, default_notional=100)

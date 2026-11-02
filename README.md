@@ -78,6 +78,18 @@ is stored with reason `buy_signal_skipped_max_open_positions` but not alerted.
 Exits are never blocked. Backtests run each symbol on its own, so they do not
 apply this limit.
 
+### Position size
+
+`SIZING=risk` (default): each entry buys the amount that loses
+`RISK_PER_TRADE` (default $10) if its stop is hit, capped at `MAX_NOTIONAL`
+(default $1,000). A stop 4 % below the entry gives $250; an entry without a
+stop buys the fixed `DEFAULT_NOTIONAL`. `SIZING=notional`: always
+`DEFAULT_NOTIONAL`. The entry alert shows the size ("Size: $250.00, risking
+$10.00 to the stop"), paper orders use it, alerts-only positions record it,
+and backtests size entries the same way. Watchlist entries can override
+`sizing`, `risk_per_trade`, `max_notional` and `notional`; the CLI has
+`--sizing`, `--risk-per-trade`, `--max-notional` and `--notional`.
+
 ## Safety model
 
 ```text
@@ -142,8 +154,20 @@ uv run trading-pipeline --symbol "BTC/USD" --asset-class crypto --timeframe 1Hou
 Timeframes: `1Min`–`59Min`, `1Hour`–`23Hour`, `1Day`.
 
 Strategy: `strategy = "..."` per `[[watch]]` entry or under `[defaults]` in
-`watchlist.toml`; `--strategy` for a single symbol or a backtest, which is also
-the watchlist default (fallback: `DEFAULT_STRATEGY`, then `sma_rsi`).
+`watchlist.toml`; `--strategy` for a single symbol, and the watchlist default
+(fallback: `DEFAULT_STRATEGY`, then `sma_rsi`). In a backtest, `--strategy`
+runs that strategy on every watchlist entry.
+
+Strategy parameters: `params = { fast = 10 }` per `[[watch]]` entry, or under
+`[defaults]` for entries using the default strategy; `--param fast=10`
+(repeatable) on the command line, for the entries running `--strategy`. Every
+signal, position and backtest stores the full parameter set it ran with.
+
+Stock data comes from the SIP feed (all US exchanges, `ALPACA_STOCK_FEED=sip`).
+On the free plan Alpaca only serves SIP data older than 15 minutes, so stock
+bars are requested up to 16 minutes ago and the watcher wakes up 16 minutes
+after each bar boundary; daily alerts are unaffected. `iex` is real time but
+sees only about 3 % of the market's volume.
 
 Backtest (same decision logic, realistic default costs: stocks 0 commission +
 5 bps spread, crypto 0.25 % commission + 5 bps spread):
@@ -159,8 +183,8 @@ uv run trading-pipeline --backtest --symbol "BTC/USD" --asset-class crypto --tim
 - **History:** `--start`/`--end` pick the period to trade; earlier bars are
   fetched automatically to warm up the indicators. Without `--start`, the
   latest `--limit` bars are used (the first `min_bars` of them only warm up).
-- **Sizing:** each entry buys `notional` USD (`--notional`, or the watchlist
-  entry's), exactly like a paper order, so the P/L per trade is comparable with
+- **Sizing:** entries are sized exactly like paper orders (see
+  [Position size](#position-size)), so the P/L per trade is comparable with
   paper trading. `Return [%]` is relative to `--cash`; look at `P/L [$]` and
   `Avg. Trade [%]`. `--position-size 0.95` sizes entries as a fraction of
   current equity instead (compounding).
@@ -215,8 +239,9 @@ versioned with `PRAGMA user_version` and migrated automatically on start:
 
 ## Strategies
 
-A strategy (`strategies/base.py`) only produces signals; entries and exits are
-always decided by `decisions.decide`, live and in the backtest. It defines:
+A strategy (`strategies/base.py`) produces signals and position rules;
+entries and exits are always decided by `decisions.evaluate`/`decide`,
+identically live and in the backtest. It defines:
 
 - `name`: the key used in `watchlist.toml`, `--strategy` and the database
 - `features`: indicators it reads, computed on top of `DEFAULT_FEATURES`
@@ -228,6 +253,23 @@ always decided by `decisions.decide`, live and in the backtest. It defines:
   the strategy cannot look ahead.
 - `risk_levels(entry_price, latest)`: stop and target for a new long (either
   may be `None`); also used for positions adopted from the paper account
+
+Optional hooks:
+
+- `derive(frame, context)`: extra columns computed once over all bars (e.g. a
+  score). They must be causal (a value at bar i uses only bars up to i); a
+  test checks this for every registered strategy.
+- `benchmark_for(symbol, asset_class)`: a symbol whose closes `derive` needs
+  (e.g. SPY for relative strength), fetched alongside, live and in backtests.
+- `manage(position, history)`: rules for an open position at each bar close: a
+  new stop (trailing; only ever raised, and used from the next bar on) or an
+  exit request (e.g. a maximum holding period).
+- `stop_trigger`: `low` (a stop is hit when the bar's low touches it) or
+  `close` (only a close beyond it counts).
+
+Indicator kinds available to `features` (all computed by pandas-ta-classic):
+`sma`, `ema`, `rsi`, `macd`, `bbands`, `atr`, `natr`, `adx`, `stoch`,
+`donchian`, `roc`, `rvol` (volume relative to its average) and `candles`.
 
 To add one: subclass `Strategy` as a frozen dataclass whose fields are its
 parameters, register it in `strategies/__init__.py` (`STRATEGIES`), add tests,

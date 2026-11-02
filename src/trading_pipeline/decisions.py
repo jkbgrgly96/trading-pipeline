@@ -15,14 +15,39 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from trading_pipeline.domain import (
+    AssetClass,
     Decision,
     DecisionAction,
     ExitReason,
     OpenPosition,
+    PositionPlan,
     Signal,
     SignalAction,
+    StopTrigger,
 )
 from trading_pipeline.features import FeatureSnapshot
+from trading_pipeline.strategies.base import History, Strategy
+
+
+def evaluate(
+    strategy: Strategy,
+    symbol: str,
+    asset_class: AssetClass,
+    history: History,
+    position: OpenPosition | None,
+    entries_allowed: bool = True,
+) -> Decision:
+    """One closed bar, live or in the backtest: signal + position rules -> decision."""
+    signal = strategy.signal(symbol, asset_class, history)
+    plan = strategy.manage(position, history) if position is not None else None
+    return decide(
+        signal,
+        position,
+        history.latest,
+        entries_allowed=entries_allowed,
+        plan=plan,
+        stop_trigger=StopTrigger(strategy.stop_trigger),
+    )
 
 
 def decide(
@@ -30,9 +55,16 @@ def decide(
     position: OpenPosition | None,
     latest: FeatureSnapshot,
     entries_allowed: bool = True,
+    plan: PositionPlan | None = None,
+    stop_trigger: StopTrigger = StopTrigger.INTRABAR,
 ) -> Decision:
     """``entries_allowed=False`` blocks new entries (e.g. the open-position cap is
-    reached); exits of an open position are never blocked."""
+    reached); exits of an open position are never blocked.
+
+    The stop in force for this bar is the position's stored one. A raised stop
+    from ``plan`` applies from the next bar on (it is computed from this bar's
+    data, so checking this bar against it would look ahead within the bar).
+    """
     if position is None:
         if signal.action == SignalAction.BUY and not entries_allowed:
             return Decision(
@@ -62,24 +94,30 @@ def decide(
     # only checked from the following bar on.
     levels_active = _as_utc(latest.timestamp) > _as_utc(position.entry_time)
 
+    intrabar = stop_trigger == StopTrigger.INTRABAR
+    stop_price, stop_label = (latest.low, "low") if intrabar else (latest.close, "close")
+    target_price, target_label = (latest.high, "high") if intrabar else (latest.close, "close")
+
     # Stop is checked before target: if a single bar spans both, assume the
     # worse outcome (the conservative choice, also used by most backtesters).
-    if levels_active and position.stop_loss is not None and latest.low <= position.stop_loss:
+    if levels_active and position.stop_loss is not None and stop_price <= position.stop_loss:
         return _exit(
             signal,
             position,
             latest,
             ExitReason.STOP_LOSS,
-            f"low {latest.low:.4f} <= stop {position.stop_loss:.4f}",
+            f"{stop_label} {stop_price:.4f} <= stop {position.stop_loss:.4f}",
         )
-    if levels_active and position.take_profit is not None and latest.high >= position.take_profit:
+    if levels_active and position.take_profit is not None and target_price >= position.take_profit:
         return _exit(
             signal,
             position,
             latest,
             ExitReason.TAKE_PROFIT,
-            f"high {latest.high:.4f} >= target {position.take_profit:.4f}",
+            f"{target_label} {target_price:.4f} >= target {position.take_profit:.4f}",
         )
+    if plan is not None and plan.exit_reason:
+        return _exit(signal, position, latest, ExitReason.STRATEGY, plan.exit_reason)
     if signal.action == SignalAction.SELL:
         return _exit(signal, position, latest, ExitReason.SIGNAL, signal.reason)
 
@@ -93,10 +131,17 @@ def decide(
         reason,
         signal,
         latest.close,
-        stop_loss=position.stop_loss,
+        stop_loss=_raised_stop(position.stop_loss, plan.stop_loss if plan else None),
         take_profit=position.take_profit,
         position=position,
     )
+
+
+def _raised_stop(current: float | None, proposed: float | None) -> float | None:
+    """Trailing stops only move up (for a long): a lower proposal is ignored."""
+    if proposed is None:
+        return current
+    return proposed if current is None else max(current, proposed)
 
 
 def _exit(

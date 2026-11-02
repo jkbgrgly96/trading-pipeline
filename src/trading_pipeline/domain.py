@@ -34,6 +34,14 @@ class ExitReason(str, Enum):
     STOP_LOSS = "stop_loss_hit"
     TAKE_PROFIT = "take_profit_hit"
     SIGNAL = "sell_signal"
+    STRATEGY = "strategy_exit"  # a position rule of the strategy, e.g. max holding period
+
+
+class StopTrigger(str, Enum):
+    """What price a stop/target is checked against on the closed bar."""
+
+    INTRABAR = "low"  # stop: bar low, target: bar high (touching the level is enough)
+    CLOSE = "close"  # stop and target: bar close only (ignores intrabar spikes)
 
 
 @dataclass(frozen=True)
@@ -80,6 +88,18 @@ class OpenPosition:
     entry_order_id: str | None = None
     # Paper fill price of the entry order, once known (``entry_price`` is the alert's bar close).
     entry_fill_price: float | None = None
+
+
+@dataclass(frozen=True)
+class PositionPlan:
+    """A strategy's view on an open position, evaluated at a bar close.
+
+    ``stop_loss`` is the stop to use from the next bar on; it is only ever
+    raised, never lowered. ``exit_reason`` asks to close the position now.
+    """
+
+    stop_loss: float | None = None
+    exit_reason: str | None = None
 
 
 @dataclass(frozen=True)

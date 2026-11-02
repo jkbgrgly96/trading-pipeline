@@ -12,8 +12,13 @@ from trading_pipeline.config import Settings, load_settings
 from trading_pipeline.domain import AssetClass
 from trading_pipeline.notifications.base import MultiNotifier, Notifier
 from trading_pipeline.notifications.console import ConsoleNotifier
+from trading_pipeline.sizing import Sizing
 from trading_pipeline.storage import Storage
-from trading_pipeline.strategies import available_strategies, get_strategy
+from trading_pipeline.strategies import (
+    available_strategies,
+    get_strategy,
+    parse_param_assignments,
+)
 from trading_pipeline.timeframes import parse_timeframe
 
 if TYPE_CHECKING:
@@ -57,13 +62,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strategy",
         choices=available_strategies(),
-        help="Strategy for a single symbol or backtest, and the watchlist default "
-        "(default: DEFAULT_STRATEGY or sma_rsi).",
+        help="Strategy for a single symbol, the watchlist default, and in a backtest the "
+        "strategy run on every watchlist entry (default: DEFAULT_STRATEGY or sma_rsi).",
+    )
+    parser.add_argument(
+        "--param",
+        action="append",
+        metavar="KEY=VALUE",
+        help="Strategy parameter override, repeatable (e.g. --param fast=10). Applies to "
+        "entries that run the --strategy strategy.",
     )
     parser.add_argument("--limit", type=int, help="Number of bars to request.")
     parser.add_argument(
-        "--notional", type=float, help="USD per paper order, and per backtest entry."
+        "--notional",
+        type=float,
+        help="USD per entry with --sizing notional (and the fallback without a stop).",
     )
+    parser.add_argument(
+        "--sizing",
+        choices=["risk", "notional"],
+        help="risk: buy the amount that loses --risk-per-trade if the stop is hit, capped at "
+        "--max-notional; notional: --notional per entry (default: SIZING or risk). Used by "
+        "paper orders, alerts and backtests alike.",
+    )
+    parser.add_argument("--risk-per-trade", type=float, help="USD at risk per entry (default: 10).")
+    parser.add_argument("--max-notional", type=float, help="Largest entry in USD (default: 1000).")
     parser.add_argument(
         "--watchlist",
         help="TOML watchlist for --watch/--once (default: WATCHLIST_PATH or watchlist.toml). "
@@ -145,10 +168,18 @@ def main(argv: list[str] | None = None) -> int:
     strategy_name = args.strategy or settings.default_strategy
     limit = args.limit if args.limit is not None else settings.default_bar_limit
     notional = args.notional if args.notional is not None else settings.default_notional
+    sizing_values = {
+        "mode": args.sizing or settings.sizing,
+        "notional": notional,
+        "risk_per_trade": args.risk_per_trade if args.risk_per_trade is not None else settings.risk_per_trade,
+        "max_notional": args.max_notional if args.max_notional is not None else settings.max_notional,
+    }
 
     try:
         parse_timeframe(timeframe)
-        strategy = get_strategy(strategy_name)
+        cli_params = parse_param_assignments(args.param)
+        sizing = Sizing(**sizing_values)
+        strategy = get_strategy(strategy_name, cli_params)
         if args.position_size is not None and not 0 < args.position_size <= 1:
             raise ValueError("--position-size must be in (0, 1].")
         if limit <= 0 or notional <= 0:
@@ -183,23 +214,46 @@ def main(argv: list[str] | None = None) -> int:
     storage.initialize()
 
     def watch_items(use_watchlist: bool) -> list[WatchItem]:
-        from trading_pipeline.watch import WatchItem, load_watchlist
+        from trading_pipeline.watch import WatchItem, freeze_params, load_watchlist
 
         watchlist_path = Path(args.watchlist or settings.watchlist_path)
         if use_watchlist and watchlist_path.exists():
-            return load_watchlist(watchlist_path, limit, notional, strategy_name)
+            try:
+                items = load_watchlist(watchlist_path, limit, notional, strategy_name, sizing)
+                return [
+                    replace(item, params=freeze_params({**item.strategy_params, **cli_params}))
+                    if cli_params and item.strategy == strategy_name
+                    else item
+                    for item in items
+                ]
+            except ValueError as exc:
+                parser.error(f"{watchlist_path}: {exc}")
         if use_watchlist and args.watchlist:
             parser.error(f"Watchlist not found: {watchlist_path}")
-        return [WatchItem(symbol, asset_class, timeframe, limit, notional, strategy_name)]
+        return [
+            WatchItem(
+                symbol, asset_class, timeframe, limit, notional, strategy_name,
+                freeze_params(cli_params), sizing.mode.value, sizing.risk_per_trade,
+                sizing.max_notional,
+            )
+        ]
 
     if args.backtest:
+        from trading_pipeline.watch import freeze_params, validate_watchlist
+
         items = watch_items(use_watchlist=args.symbol is None)
+        if args.strategy:
+            # Backtesting a strategy means running it on every entry.
+            items = [
+                item
+                if item.strategy == args.strategy
+                else replace(item, strategy=args.strategy, params=freeze_params(cli_params))
+                for item in items
+            ]
         if args.limit is not None:
             # History length is a backtest setting: --limit applies to every entry.
             items = [replace(item, limit=args.limit) for item in items]
         try:
-            from trading_pipeline.watch import validate_watchlist
-
             validate_watchlist(items, orders_enabled=False)
         except ValueError as exc:
             parser.error(str(exc))
@@ -248,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         notify_hold=notify_hold,
         strategy=strategy,
         max_open_positions=max_open_positions,
+        sizing=sizing,
     )
     if result.status == "already_processed":
         print(f"bar {result.bar_timestamp.isoformat()} already processed; nothing to do")
@@ -315,8 +370,13 @@ def _run_backtests(args, broker, storage, items: list[WatchItem], start, end) ->
         _, run_id, config, summary = rows[0]
         for key, value in summary.items():
             print(f"{key}={value}")
+        risk = (
+            f" risk_per_trade={config.risk_per_trade:g} max_notional={config.max_notional:g}"
+            if config.sizing == "risk"
+            else ""
+        )
         print(
-            f"strategy={config.strategy} sizing={config.sizing} notional={config.notional:g} "
+            f"strategy={config.strategy} sizing={config.sizing} notional={config.notional:g}{risk} "
             f"commission={config.commission} spread={config.spread}"
         )
         print(f"backtest_run_id={run_id}")
@@ -339,27 +399,38 @@ def _backtest_item(args, broker, storage, item: WatchItem, start, end):
         symbol=item.symbol,
         asset_class=item.asset_class,
         strategy=item.strategy,
+        strategy_params=item.strategy_params,
         cash=args.cash,
         commission=args.commission if args.commission is not None else default_commission,
         spread=args.spread if args.spread is not None else default_spread,
         notional=item.notional,
+        risk_per_trade=item.risk_per_trade if item.sizing.mode.value == "risk" else None,
+        max_notional=item.max_notional,
         position_size=args.position_size,
         trade_on_close=args.trade_on_close,
         fractional_unit=args.fractional_unit,
         start=start,
     )
     config.validate()
-    bars = fetch_backtest_bars(
-        broker,
-        item.symbol,
-        item.asset_class,
-        item.timeframe,
-        min_bars=get_strategy(item.strategy).min_bars,
-        limit=item.limit,
-        start=start,
-        end=end,
+    strategy = item.build_strategy()
+
+    def fetch(symbol: str) -> list:
+        return fetch_backtest_bars(
+            broker,
+            symbol,
+            item.asset_class,
+            item.timeframe,
+            min_bars=strategy.min_bars,
+            limit=item.limit,
+            start=start,
+            end=end,
+        )
+
+    bars = fetch(item.symbol)
+    benchmark = strategy.benchmark_for(item.symbol, item.asset_class)
+    result = run_strategy_backtest(
+        bars=bars, config=config, benchmark_bars=fetch(benchmark) if benchmark else None
     )
-    result = run_strategy_backtest(bars=bars, config=config)
     storage.save_market_bars(item.symbol, item.asset_class, item.timeframe, bars, source="alpaca")
     storage.save_feature_snapshots(item.symbol, item.asset_class, item.timeframe, result.feature_frame)
     run_id = storage.save_backtest(

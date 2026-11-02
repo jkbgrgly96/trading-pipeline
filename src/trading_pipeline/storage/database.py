@@ -23,7 +23,7 @@ from trading_pipeline.features import FeatureSnapshot, snapshots_from_frame
 if TYPE_CHECKING:
     from trading_pipeline.backtest.runner import BacktestConfig, BacktestResult
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 
 class Storage:
@@ -74,6 +74,10 @@ class Storage:
                     _migrate_to_v4(connection)
                 if version < 5:
                     _migrate_to_v5(connection)
+                if version < 6:
+                    _migrate_to_v6(connection)
+                if version < 7:
+                    _migrate_to_v7(connection)
                 if version < SCHEMA_VERSION:
                     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 connection.execute("COMMIT")
@@ -197,6 +201,7 @@ class Storage:
         notify_required: bool = False,
         notify_message: str | None = None,
         strategy: str | None = None,
+        strategy_params: Mapping[str, Any] | None = None,
     ) -> int | None:
         """Insert the signal/decision for a bar.
 
@@ -211,9 +216,9 @@ class Storage:
                     action, confidence, latest_close, reason, patterns_json,
                     features_json, order_id, orders_enabled, decision,
                     decision_reason, stop_loss, take_profit, notify_required,
-                    notify_message, strategy
+                    notify_message, strategy, strategy_params
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol, asset_class, timeframe, bar_timestamp) DO NOTHING
                 """,
                 (
@@ -237,6 +242,7 @@ class Storage:
                     int(notify_required),
                     notify_message,
                     strategy,
+                    _optional_json(strategy_params),
                 ),
             )
             if cursor.rowcount == 0:
@@ -385,6 +391,8 @@ class Storage:
         entry_signal_id: int | None = None,
         entry_order_id: str | None = None,
         strategy: str | None = None,
+        strategy_params: Mapping[str, Any] | None = None,
+        notional: float | None = None,
     ) -> int:
         now = _now()
         with self.connect() as connection:
@@ -393,9 +401,9 @@ class Storage:
                 INSERT INTO positions (
                     symbol, asset_class, timeframe, source, status, entry_time,
                     entry_price, quantity, stop_loss, take_profit, entry_signal_id,
-                    entry_order_id, created_at, updated_at, strategy
+                    entry_order_id, created_at, updated_at, strategy, strategy_params, notional
                 )
-                VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     symbol,
@@ -412,6 +420,8 @@ class Storage:
                     now,
                     now,
                     strategy,
+                    _optional_json(strategy_params),
+                    notional,
                 ),
             )
             return int(cursor.lastrowid)
@@ -462,6 +472,13 @@ class Storage:
                 WHERE id = ?
                 """,
                 (price, _optional_timestamp(filled_at), _now(), position_id),
+            )
+
+    def update_position_stop(self, position_id: int, stop_loss: float) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE positions SET stop_loss = ?, updated_at = ? WHERE id = ? AND status = 'open'",
+                (stop_loss, _now(), position_id),
             )
 
     def set_position_entry_order(self, position_id: int, order_id: str | None) -> None:
@@ -556,9 +573,10 @@ class Storage:
                     created_at, symbol, asset_class, timeframe, bar_limit, cash,
                     commission, spread, position_size, start, end, return_pct,
                     buy_hold_return_pct, max_drawdown_pct, sharpe_ratio,
-                    trade_count, win_rate_pct, stats_json, strategy, sizing, notional
+                    trade_count, win_rate_pct, stats_json, strategy, sizing, notional,
+                    strategy_params, risk_per_trade, max_notional
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _now(),
@@ -585,6 +603,9 @@ class Storage:
                     config.strategy,
                     config.sizing,
                     config.notional if config.position_size is None else None,
+                    _json(result.strategy_params),
+                    config.risk_per_trade if config.sizing == "risk" else None,
+                    config.max_notional if config.sizing == "risk" else None,
                 ),
             )
             run_id = int(cursor.lastrowid)
@@ -768,6 +789,23 @@ def _migrate_to_v5(connection: sqlite3.Connection) -> None:
         connection.execute(f"ALTER TABLE positions ADD COLUMN {column}")
 
 
+def _migrate_to_v6(connection: sqlite3.Connection) -> None:
+    """Strategy parameters (JSON, every parameter including defaults).
+
+    Earlier rows ran with the defaults of their strategy; they stay NULL.
+    """
+    for table in ("signals", "positions", "backtest_runs"):
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN strategy_params TEXT")
+
+
+def _migrate_to_v7(connection: sqlite3.Connection) -> None:
+    """Entry sizing: ``positions.notional`` is the USD amount an entry buys (or,
+    alerts only, the suggested amount); backtests record their risk sizing."""
+    connection.execute("ALTER TABLE positions ADD COLUMN notional REAL")
+    connection.execute("ALTER TABLE backtest_runs ADD COLUMN risk_per_trade REAL")
+    connection.execute("ALTER TABLE backtest_runs ADD COLUMN max_notional REAL")
+
+
 def _execute_script(connection: sqlite3.Connection, script: str) -> None:
     """Run statements one by one inside the caller's transaction.
 
@@ -798,6 +836,10 @@ def _find_first_column(
     if required:
         raise KeyError(f"None of the columns exist: {candidates}")
     return None
+
+
+def _optional_json(value: Any) -> str | None:
+    return None if value is None else _json(value)
 
 
 def _json(value: Any) -> str:

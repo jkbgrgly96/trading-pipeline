@@ -25,6 +25,7 @@ def format_decision(
     timeframe: str,
     order_line: str,
     strategy: str | None = None,
+    size_text: str | None = None,
 ) -> str:
     signal = decision.signal
     header_context = (
@@ -45,6 +46,8 @@ def format_decision(
                 f"   Target: {_price(decision.take_profit)}"
                 f" ({_pct(decision.take_profit, decision.price)})"
             )
+        if size_text:
+            lines.append(f"Size: {size_text}")
         lines += [
             f"Why: {decision.reason}",
             f"Confidence: {signal.confidence:.2f}",

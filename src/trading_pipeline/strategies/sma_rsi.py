@@ -26,6 +26,12 @@ class SmaRsiStrategy(Strategy):
     stop_loss_pct: float = 0.04
     take_profit_pct: float = 0.08
 
+    def __post_init__(self) -> None:
+        if not 0 < self.fast < self.slow:
+            raise ValueError("sma_rsi needs 0 < fast < slow.")
+        if not (0 < self.stop_loss_pct < 1 and self.take_profit_pct > 0):
+            raise ValueError("sma_rsi needs 0 < stop_loss_pct < 1 and take_profit_pct > 0.")
+
     @property
     def _fast_name(self) -> str:
         return f"sma_{self.fast}"

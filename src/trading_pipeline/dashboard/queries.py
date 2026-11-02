@@ -203,6 +203,7 @@ def load_positions(
     closed = frame["status"] == "closed"
     frame["mark_price"] = exit_fill.fillna(exit_alert).where(closed, _numeric(frame, "last_close"))
     frame["pnl_pct"] = (frame["mark_price"] / entry - 1) * 100
+    frame["pnl_usd"] = _numeric(frame, "notional") * frame["pnl_pct"] / 100
     frame["entry_fill_vs_alert_pct"] = (entry_fill / entry_alert - 1) * 100
     frame["exit_fill_vs_alert_pct"] = (exit_fill / exit_alert - 1) * 100
     frame["to_stop_pct"] = (pd.to_numeric(frame["stop_loss"], errors="coerce") / frame["mark_price"] - 1) * 100

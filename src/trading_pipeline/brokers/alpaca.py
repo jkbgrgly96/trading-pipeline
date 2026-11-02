@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from trading_pipeline.brokers.base import Broker, BrokerOrder, BrokerPosition
 from trading_pipeline.domain import AssetClass, Bar
 from trading_pipeline.timeframes import parse_timeframe
+
+# The free market data plan serves SIP (full market) bars only once they are
+# older than 15 minutes; a minute of margin avoids edge-of-window refusals.
+SIP_DELAY = timedelta(minutes=16)
 
 
 class AlpacaBroker(Broker):
@@ -14,7 +18,7 @@ class AlpacaBroker(Broker):
         api_key: str,
         secret_key: str,
         paper: bool = True,
-        stock_feed: str = "iex",
+        stock_feed: str = "sip",
         adjustment: str = "split",
     ) -> None:
         if not api_key or not secret_key:
@@ -32,6 +36,7 @@ class AlpacaBroker(Broker):
             TradingClient(api_key, secret_key, paper=True) if self._paper else None
         )
         self._stock_feed = _to_data_feed(stock_feed)
+        self._stock_delay = SIP_DELAY if self._stock_feed.value == "sip" else timedelta(0)
         # Raw stock bars show a split as a crash (or a jump), which fires stops
         # and fake crossovers in backtests and in live indicators alike.
         self._adjustment = _to_adjustment(adjustment)
@@ -39,6 +44,9 @@ class AlpacaBroker(Broker):
     @property
     def is_paper(self) -> bool:
         return self._paper
+
+    def data_delay(self, asset_class: AssetClass) -> timedelta:
+        return self._stock_delay if asset_class == AssetClass.STOCK else timedelta(0)
 
     def get_bars(
         self,
@@ -76,6 +84,7 @@ class AlpacaBroker(Broker):
     ) -> list[Bar]:
         from alpaca.common.enums import Sort
 
+        end = min(end, datetime.now(UTC) - self.data_delay(asset_class))
         common: dict[str, Any] = {
             "symbol_or_symbols": symbol,
             "timeframe": parse_timeframe(timeframe).to_alpaca(),

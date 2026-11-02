@@ -3,10 +3,12 @@
 # With paper orders enabled, a symbol may appear only once (one paper position per symbol).
 
 [defaults]
-limit = 250        # bars to fetch; the strategy needs at least 60 closed bars
-notional = 100     # USD per paper order (ignored in alerts-only mode)
+limit = 250        # bars to fetch; must cover the strategy's min_bars
 asset_class = "stock"
 strategy = "sma_rsi"  # any entry can override it with its own strategy = "..."
+# params = { fast = 10 }   # parameters for entries using the default strategy
+# Sizing (defaults from .env): sizing = "risk" | "notional", risk_per_trade,
+# max_notional, notional. Any entry can override them.
 
 [[watch]]
 symbol = "AAPL"

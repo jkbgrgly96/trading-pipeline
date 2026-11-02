@@ -185,3 +185,57 @@ def test_backtest_runs_the_configured_strategy_without_look_ahead(storage, monke
     with storage.connect() as connection:
         row = connection.execute("SELECT strategy FROM backtest_runs WHERE id = ?", (run_id,)).fetchone()
     assert row[0] == "never"
+
+
+# --- parameters ----------------------------------------------------------------
+
+
+def test_get_strategy_applies_typed_and_string_params():
+    from trading_pipeline.strategies import parse_param_assignments
+
+    typed = get_strategy("sma_rsi", {"fast": 10, "stop_loss_pct": 0.05})
+    from_cli = get_strategy("sma_rsi", parse_param_assignments(["fast=10", "stop_loss_pct=0.05"]))
+
+    assert typed == from_cli == SmaRsiStrategy(fast=10, stop_loss_pct=0.05)
+    assert typed.params()["fast"] == 10 and typed.params()["slow"] == 50
+
+
+@pytest.mark.parametrize(
+    ("params", "message"),
+    [
+        ({"nope": 1}, "has no parameter 'nope'"),
+        ({"fast": "ten"}, "must be int"),
+        ({"fast": 1.5}, "must be int"),
+        ({"fast": True}, "must be int"),
+        ({"stop_loss_pct": "x"}, "must be float"),
+        ({"fast": 60}, "fast < slow"),  # the strategy's own validation
+    ],
+)
+def test_bad_params_are_rejected(params, message):
+    with pytest.raises(ValueError, match=message):
+        get_strategy("sma_rsi", params)
+
+
+def test_param_assignments_must_be_key_value():
+    from trading_pipeline.strategies import parse_param_assignments
+
+    with pytest.raises(ValueError, match="key=value"):
+        parse_param_assignments(["fast"])
+
+
+def test_pipeline_stores_the_strategy_params(storage):
+    import json
+
+    bars = crossover_bars()
+    run_once(
+        broker=FakeBroker(bars), notifier=RecordingNotifier(), symbol="TEST",
+        asset_class=AssetClass.STOCK, timeframe="1Day", limit=500, orders_enabled=False,
+        notional=100.0, storage=storage, now=after_close(bars),
+        strategy=get_strategy("sma_rsi", {"take_profit_pct": 0.1}),
+    )
+
+    with storage.connect() as connection:
+        signal_params = connection.execute("SELECT strategy_params FROM signals").fetchone()[0]
+        position_params = connection.execute("SELECT strategy_params FROM positions").fetchone()[0]
+    assert json.loads(signal_params)["take_profit_pct"] == 0.1
+    assert json.loads(position_params) == json.loads(signal_params)

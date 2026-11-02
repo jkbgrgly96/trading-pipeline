@@ -25,6 +25,20 @@ def compute_pandas_ta_features(
             _add_atr(output, definition)
         elif kind == "candles":
             _add_candles(output, definition)
+        elif kind == "ema":
+            _add_ema(output, definition)
+        elif kind == "adx":
+            _add_adx(output, definition)
+        elif kind == "donchian":
+            _add_donchian(output, definition)
+        elif kind == "stoch":
+            _add_stoch(output, definition)
+        elif kind == "natr":
+            _add_natr(output, definition)
+        elif kind == "rvol":
+            _add_relative_volume(output, definition)
+        elif kind == "roc":
+            _add_roc(output, definition)
         else:
             raise ValueError(f"Unsupported indicator kind: {definition.kind}")
     return output
@@ -82,6 +96,73 @@ def _add_atr(frame: pd.DataFrame, definition: IndicatorDefinition) -> None:
         frame["Close"],
         length=length,
     )
+
+
+def _add_ema(frame: pd.DataFrame, definition: IndicatorDefinition) -> None:
+    length = int(definition.params.get("length", 20))
+    frame[definition.name] = ta.ema(frame["Close"], length=length)
+
+
+def _add_adx(frame: pd.DataFrame, definition: IndicatorDefinition) -> None:
+    """``<name>`` = ADX (trend strength), ``<name>_dmp`` / ``<name>_dmn`` = +DI / -DI."""
+    length = int(definition.params.get("length", 14))
+    names = [definition.name, f"{definition.name}_dmp", f"{definition.name}_dmn"]
+    result = ta.adx(frame["High"], frame["Low"], frame["Close"], length=length)
+    if result is None:
+        _add_empty_columns(frame, names)
+        return
+    for name, prefix in zip(names, ["ADX_", "DMP_", "DMN_"], strict=True):
+        frame[name] = _first_column_with_prefix(result, prefix)
+
+
+def _add_donchian(frame: pd.DataFrame, definition: IndicatorDefinition) -> None:
+    """Channel of the last N bars *including* the current one; compare a close
+    with the previous bar's channel for a breakout."""
+    lower = int(definition.params.get("lower_length", 20))
+    upper = int(definition.params.get("upper_length", 20))
+    names = [f"{definition.name}_lower", f"{definition.name}_middle", f"{definition.name}_upper"]
+    result = ta.donchian(frame["High"], frame["Low"], lower_length=lower, upper_length=upper)
+    if result is None:
+        _add_empty_columns(frame, names)
+        return
+    for name, prefix in zip(names, ["DCL_", "DCM_", "DCU_"], strict=True):
+        frame[name] = _first_column_with_prefix(result, prefix)
+
+
+def _add_stoch(frame: pd.DataFrame, definition: IndicatorDefinition) -> None:
+    """``<name>_k`` / ``<name>_d``: slow stochastic %K and %D (0..100)."""
+    k = int(definition.params.get("k", 14))
+    d = int(definition.params.get("d", 3))
+    smooth_k = int(definition.params.get("smooth_k", 3))
+    names = [f"{definition.name}_k", f"{definition.name}_d"]
+    result = ta.stoch(frame["High"], frame["Low"], frame["Close"], k=k, d=d, smooth_k=smooth_k)
+    if result is None:
+        _add_empty_columns(frame, names)
+        return
+    for name, prefix in zip(names, ["STOCHk_", "STOCHd_"], strict=True):
+        frame[name] = _first_column_with_prefix(result, prefix)
+
+
+def _add_natr(frame: pd.DataFrame, definition: IndicatorDefinition) -> None:
+    """ATR as a percentage of the close."""
+    length = int(definition.params.get("length", 14))
+    frame[definition.name] = ta.natr(frame["High"], frame["Low"], frame["Close"], length=length)
+
+
+def _add_relative_volume(frame: pd.DataFrame, definition: IndicatorDefinition) -> None:
+    """Volume divided by its simple moving average (1.0 = an average bar)."""
+    length = int(definition.params.get("length", 20))
+    average = ta.sma(frame["Volume"], length=length)
+    if average is None:
+        _add_empty_columns(frame, [definition.name])
+        return
+    frame[definition.name] = frame["Volume"] / average.where(average > 0)
+
+
+def _add_roc(frame: pd.DataFrame, definition: IndicatorDefinition) -> None:
+    """Rate of change of the close over ``length`` bars, in percent."""
+    length = int(definition.params.get("length", 10))
+    frame[definition.name] = ta.roc(frame["Close"], length=length)
 
 
 def _add_candles(frame: pd.DataFrame, definition: IndicatorDefinition) -> None:

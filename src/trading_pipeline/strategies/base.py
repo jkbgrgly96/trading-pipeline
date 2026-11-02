@@ -1,24 +1,39 @@
 """The interface every strategy implements.
 
 A strategy turns the feature history of one symbol into a ``Signal`` (BUY /
-SELL / HOLD) and says where the stop and target of a new long position go.
-It never sees positions or orders: ``decisions.decide`` combines the signal
-with the current position, identically in the live pipeline and the backtest.
+SELL / HOLD), says where the stop and target of a new long position go and,
+optionally, how an open position is managed (trailing stop, time exit). It
+never places orders or decides on its own: ``decisions.evaluate`` combines its
+answers with the current position, identically live and in the backtest.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
-from typing import ClassVar, overload
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, ClassVar, overload
 
-from trading_pipeline.domain import AssetClass, Signal, SignalAction
+import pandas as pd
+
+from trading_pipeline.domain import (
+    AssetClass,
+    Bar,
+    OpenPosition,
+    PositionPlan,
+    Signal,
+    SignalAction,
+)
 from trading_pipeline.features import (
     DEFAULT_FEATURES,
     FeatureSnapshot,
     IndicatorDefinition,
+    compute_feature_frame,
     merge_definitions,
 )
+from trading_pipeline.features.frame import bars_to_ohlcv_frame
 
 
 class History(Sequence[FeatureSnapshot]):
@@ -63,6 +78,25 @@ class History(Sequence[FeatureSnapshot]):
     def previous(self) -> FeatureSnapshot:
         return self[-2]
 
+    def since(self, timestamp: datetime, limit: int | None = None) -> list[FeatureSnapshot]:
+        """Bars strictly after ``timestamp`` (e.g. a position's entry bar), oldest
+        first; with ``limit``, only the most recent ``limit`` of them."""
+        cutoff = _as_utc(timestamp)
+        picked: list[FeatureSnapshot] = []
+        for position in range(self._end - 1, -1, -1):
+            snapshot = self._snapshots[position]
+            if _as_utc(snapshot.timestamp) <= cutoff or (limit is not None and len(picked) >= limit):
+                break
+            picked.append(snapshot)
+        return picked[::-1]
+
+
+@dataclass(frozen=True)
+class MarketContext:
+    """Series from other symbols, aligned to (and forward-filled on) the bars."""
+
+    benchmark_close: pd.Series | None = None
+
 
 class Strategy(ABC):
     """Signal rules plus stop/target placement for one trading idea.
@@ -74,6 +108,10 @@ class Strategy(ABC):
 
     #: Registry key, used in watchlist.toml, ``--strategy`` and the database.
     name: ClassVar[str]
+
+    #: ``low``: a stop is hit when the bar's low touches it (target: high).
+    #: ``close``: only a close beyond the level counts. Strategies may make it a field.
+    stop_trigger = "low"
 
     @property
     @abstractmethod
@@ -102,6 +140,57 @@ class Strategy(ABC):
     def feature_definitions(self) -> list[IndicatorDefinition]:
         """Everything to compute: the dashboard's defaults plus ``features``."""
         return merge_definitions(DEFAULT_FEATURES, self.features)
+
+    def benchmark_for(self, symbol: str, asset_class: AssetClass) -> str | None:
+        """Symbol (same asset class) whose closes ``derive`` needs, e.g. SPY."""
+        return None
+
+    def derive(self, frame: pd.DataFrame, context: MarketContext) -> Mapping[str, pd.Series]:
+        """Extra columns computed once over the whole frame (e.g. a score).
+
+        They must be causal: a value at bar i may only use bars <= i, so a
+        live run and a backtest see the same numbers. Read the indicator
+        columns from ``features`` here; ``signal`` then reads the results
+        through ``History`` like any other feature.
+        """
+        return {}
+
+    def manage(self, position: OpenPosition, history: History) -> PositionPlan | None:
+        """Rules for an open position at this bar's close (trailing stop, time exit)."""
+        return None
+
+    def params(self) -> dict[str, Any]:
+        """Current parameter values, stored with every signal, position and backtest."""
+        return dataclasses.asdict(self) if dataclasses.is_dataclass(self) else {}
+
+
+def strategy_frame(
+    strategy: Strategy,
+    bars: list[Bar],
+    benchmark_bars: list[Bar] | None = None,
+    chart_features: bool = True,
+) -> pd.DataFrame:
+    """Indicators plus the strategy's derived columns, shared by live runs and backtests.
+
+    ``chart_features=False`` skips ``DEFAULT_FEATURES`` (only the dashboard
+    needs them), which makes parameter sweeps much faster.
+    """
+    definitions = strategy.feature_definitions() if chart_features else list(strategy.features)
+    frame = compute_feature_frame(bars, definitions)
+    benchmark = None
+    if benchmark_bars:
+        closes = bars_to_ohlcv_frame(benchmark_bars)["Close"]
+        benchmark = closes[~closes.index.duplicated(keep="last")].reindex(frame.index, method="ffill")
+    for name, series in strategy.derive(frame, MarketContext(benchmark_close=benchmark)).items():
+        if name in frame.columns:
+            raise ValueError(f"{strategy.name}: derived column {name!r} clashes with a feature.")
+        frame[name] = series
+    return frame
+
+
+def _as_utc(value: datetime) -> datetime:
+    value = pd.Timestamp(value).to_pydatetime()
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def hold_signal(

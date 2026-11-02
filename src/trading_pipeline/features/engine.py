@@ -15,7 +15,7 @@ def compute_feature_frame(
 ) -> pd.DataFrame:
     return compute_pandas_ta_features(
         bars_to_ohlcv_frame(bars),
-        definitions or DEFAULT_FEATURES,
+        DEFAULT_FEATURES if definitions is None else definitions,
     )
 
 
