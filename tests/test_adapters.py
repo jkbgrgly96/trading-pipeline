@@ -106,3 +106,29 @@ def test_alpaca_stock_bars_are_split_adjusted(monkeypatch):
 def test_alpaca_rejects_unknown_adjustment():
     with pytest.raises(ValueError, match="adjustment"):
         AlpacaBroker("key", "secret", paper=False, adjustment="bogus")
+
+
+@pytest.mark.parametrize(
+    ("filled_qty", "filled_avg_price", "expected_qty", "expected_price"),
+    [("0.5", "101.25", 0.5, 101.25), ("0", "0", 0.0, None), (None, None, 0.0, None)],
+)
+def test_alpaca_order_fill_details(monkeypatch, filled_qty, filled_avg_price, expected_qty, expected_price):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from alpaca.trading.enums import OrderStatus
+
+    filled_at = datetime(2026, 1, 2, 14, 30, tzinfo=UTC)
+    broker = AlpacaBroker("key", "secret", paper=True)
+    order = SimpleNamespace(
+        id="abc", status=OrderStatus.PARTIALLY_FILLED, filled_qty=filled_qty,
+        filled_avg_price=filled_avg_price, filled_at=filled_at,
+    )
+    monkeypatch.setattr(broker._trading_client, "get_order_by_id", lambda order_id: order)
+
+    result = broker.get_order("abc")
+
+    assert (result.status, result.filled_qty, result.filled_avg_price) == (
+        "partially_filled", expected_qty, expected_price,
+    )
+    assert broker.get_order_status("abc") == "partially_filled"

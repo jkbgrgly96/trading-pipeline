@@ -280,8 +280,11 @@ def _render_positions(st, database_path: Path, selected: dict) -> None:
                 "source",
                 "entry_time",
                 "entry_price",
+                "entry_fill_price",
+                "entry_fill_vs_alert_pct",
                 "exit_time",
                 "mark_price",
+                "exit_fill_vs_alert_pct",
                 "pnl_pct",
                 "exit_reason",
                 "stop_loss",
@@ -296,7 +299,9 @@ def _render_positions(st, database_path: Path, selected: dict) -> None:
     )
     st.caption(
         "Virtual positions assume you acted on every alert at the bar close. "
-        "With paper orders on, positions are reconciled with the Alpaca paper account."
+        "With paper orders on, positions are reconciled with the Alpaca paper account, and "
+        "P/L uses the paper fill prices once known. "
+        "Fill vs alert: + on entry and − on exit cost money."
     )
 
 
@@ -555,8 +560,11 @@ def _position_columns(st) -> dict:
         "entry_time": st.column_config.DatetimeColumn("Entry time", format="YYYY-MM-DD HH:mm"),
         "exit_time": st.column_config.DatetimeColumn("Exit time", format="YYYY-MM-DD HH:mm"),
         "last_bar_timestamp": st.column_config.DatetimeColumn("Last bar", format="YYYY-MM-DD HH:mm"),
-        "entry_price": st.column_config.NumberColumn("Entry", format="%.4f"),
+        "entry_price": st.column_config.NumberColumn("Entry (alert)", format="%.4f"),
+        "entry_fill_price": st.column_config.NumberColumn("Entry fill", format="%.4f"),
+        "entry_fill_vs_alert_pct": st.column_config.NumberColumn("Entry fill vs alert", format=percent),
         "mark_price": st.column_config.NumberColumn("Last / exit", format="%.4f"),
+        "exit_fill_vs_alert_pct": st.column_config.NumberColumn("Exit fill vs alert", format=percent),
         "pnl_pct": st.column_config.NumberColumn("P/L", format=percent),
         "to_stop_pct": st.column_config.NumberColumn("To stop", format=percent),
         "to_target_pct": st.column_config.NumberColumn("To target", format=percent),

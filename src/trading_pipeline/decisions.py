@@ -29,8 +29,18 @@ def decide(
     signal: Signal,
     position: OpenPosition | None,
     latest: FeatureSnapshot,
+    entries_allowed: bool = True,
 ) -> Decision:
+    """``entries_allowed=False`` blocks new entries (e.g. the open-position cap is
+    reached); exits of an open position are never blocked."""
     if position is None:
+        if signal.action == SignalAction.BUY and not entries_allowed:
+            return Decision(
+                DecisionAction.NONE,
+                f"buy_signal_skipped_max_open_positions, {signal.reason}",
+                signal,
+                latest.close,
+            )
         if signal.action == SignalAction.BUY:
             return Decision(
                 action=DecisionAction.ENTER_LONG,

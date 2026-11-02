@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from datetime import UTC, datetime, timedelta
 
-from trading_pipeline.brokers.base import Broker, BrokerPosition
+from trading_pipeline.brokers.base import Broker, BrokerOrder, BrokerPosition
 from trading_pipeline.domain import AssetClass, Bar
 from trading_pipeline.notifications.base import Notifier
 
@@ -43,6 +43,9 @@ class FakeBroker(Broker):
         self.canceled: list[str] = []
         self.fail_orders = False
         self.range_requests: list[tuple] = []
+        # order id -> (quantity, average price, filled at)
+        self.fills: dict[str, tuple[float, float, datetime]] = {}
+        self.order_lookups: list[str] = []
         self._order_seq = 0
 
     @property
@@ -86,8 +89,13 @@ class FakeBroker(Broker):
             self.order_statuses[order_id] = "canceled"
         self.canceled.append(order_id)
 
-    def get_order_status(self, order_id):
-        return self.order_statuses.get(order_id, "filled")
+    def get_order(self, order_id):
+        self.order_lookups.append(order_id)
+        status = self.order_statuses.get(order_id, "filled")
+        if order_id in self.fills:
+            quantity, price, filled_at = self.fills[order_id]
+            return BrokerOrder(order_id, status, quantity, price, filled_at)
+        return BrokerOrder(order_id, status)
 
 
 class RecordingNotifier(Notifier):

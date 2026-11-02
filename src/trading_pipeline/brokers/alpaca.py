@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from trading_pipeline.brokers.base import Broker, BrokerPosition
+from trading_pipeline.brokers.base import Broker, BrokerOrder, BrokerPosition
 from trading_pipeline.domain import AssetClass, Bar
 from trading_pipeline.timeframes import parse_timeframe
 
@@ -162,10 +162,18 @@ class AlpacaBroker(Broker):
                 return
             raise
 
-    def get_order_status(self, order_id: str) -> str:
+    def get_order(self, order_id: str) -> BrokerOrder:
         order = self._trading.get_order_by_id(order_id)
         status = order.status
-        return str(getattr(status, "value", status)).lower()
+        # Alpaca reports filled_avg_price as None or "0" until something fills.
+        price = float(order.filled_avg_price or 0) or None
+        return BrokerOrder(
+            id=str(order.id),
+            status=str(getattr(status, "value", status)).lower(),
+            filled_qty=float(order.filled_qty or 0),
+            filled_avg_price=price,
+            filled_at=order.filled_at,
+        )
 
 
 def _position_symbol(symbol: str) -> str:

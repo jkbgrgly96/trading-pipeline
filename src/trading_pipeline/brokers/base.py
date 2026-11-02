@@ -28,6 +28,24 @@ def is_order_open(status: str | None) -> bool:
     return status is not None and status != "filled" and status not in DEAD_ORDER_STATUSES
 
 
+@dataclass(frozen=True)
+class BrokerOrder:
+    id: str
+    status: str  # lower-case, e.g. ``new``, ``filled``, ``canceled``
+    filled_qty: float = 0.0
+    filled_avg_price: float | None = None
+    filled_at: datetime | None = None
+
+    @property
+    def has_fill(self) -> bool:
+        return self.filled_qty > 0 and self.filled_avg_price is not None
+
+    @property
+    def fill_is_final(self) -> bool:
+        """Filled, or (partially) filled and then dead: the fill will not change."""
+        return self.has_fill and (self.status == "filled" or self.status in DEAD_ORDER_STATUSES)
+
+
 class Broker(ABC):
     @property
     @abstractmethod
@@ -78,9 +96,13 @@ class Broker(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_order(self, order_id: str) -> BrokerOrder:
+        """Status and fill details of an order."""
+        raise NotImplementedError
+
     def get_order_status(self, order_id: str) -> str:
         """Lower-case order status, e.g. ``new``, ``filled``, ``canceled``."""
-        raise NotImplementedError
+        return self.get_order(order_id).status
 
     def ensure_paper(self) -> None:
         if not self.is_paper:
