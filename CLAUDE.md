@@ -21,6 +21,7 @@ uv run ruff check src tests              # lint (CI runs both)
 uv run trading-pipeline --once           # one pass over watchlist.toml
 uv run trading-pipeline --watch          # continuous alerts
 uv run trading-pipeline --backtest ...   # backtest
+uv run trading-pipeline --sweep --strategy NAME ...  # parameter search (in/out-of-sample)
 uv run trading-dashboard                 # Streamlit dashboard
 ```
 
@@ -54,13 +55,14 @@ watchlist item (strategy built from the item's name + params; benchmark bars cac
 | `config.py` | `Settings` from env + `.env` loader; `orders_enabled` safety gate |
 | `brokers/base.py`, `brokers/alpaca.py` | `Broker` ABC (latest bars, bars in a date range, position, buy, close, `get_order` → `BrokerOrder` with fills) and the paper-only Alpaca adapter (split-adjusted stock bars via `ALPACA_ADJUSTMENT`) |
 | `features/` | `IndicatorDefinition` list → `compute_feature_frame` (pandas-ta-classic) → `FeatureSnapshot`; `snapshots_from_frame` for bulk |
-| `strategies/` | `base.py`: `Strategy` ABC (`features`, `min_bars`, `signal`, `risk_levels`; optional `derive`, `benchmark_for`, `manage`, `stop_trigger`), `History` (look-ahead-free view, `since`), `strategy_frame`; `__init__.py`: `STRATEGIES` registry, `get_strategy(name, params)` with type coercion; `sma_rsi.py`: `SmaRsiStrategy` (default) |
+| `strategies/` | `base.py`: `Strategy` ABC (`features`, `min_bars`, `signal`, `risk_levels`; optional `derive`, `benchmark_for`, `manage`, `stop_trigger`), `History` (look-ahead-free view, `since`), `strategy_frame`; `__init__.py`: `STRATEGIES` registry, `get_strategy(name, params)` with type coercion; `sma_rsi.py` (default), `indicathor.py`, `rsi2_pullback.py`, `donchian_breakout.py` |
 | `decisions.py` | `evaluate()` (signal + position plan → decision) and `decide()`: the single source of truth for entries/exits, stop triggers and trailing stops (live + backtest) |
 | `sizing.py` | `Sizing`: notional or risk-based entry size (risk to the stop, capped); used by paper orders, alerts and backtests |
 | `pipeline.py` | `run_once`, `deliver`, `flush_outbox`, position reconciliation, order application |
 | `watch.py` | Watchlist TOML loading/validation, `Watcher` loop, error alerts with cooldown |
 | `notifications/` | `Notifier.send_message`, `MultiNotifier`, console, Telegram, `formatting.format_decision` |
 | `backtest/runner.py` | `fetch_backtest_bars` (latest `limit` or a date range + warm-up), Backtesting.py strategy wrapping `BacktestConfig.strategy` + `decisions.evaluate()` with notional, risk or equity-fraction sizing; `default_costs` |
+| `backtest/sweep.py` | Parameter sweep: `DEFAULT_GRIDS`, `parse_grid`, `run_sweep` (in-sample ranking by total P/L, top configs + defaults + `sma_rsi` re-run out of sample) |
 | `storage/database.py` | SQLite schema, versioned migrations (`PRAGMA user_version`), all writes |
 | `dashboard/` | Streamlit app (`app.py`), read-only SQL (`queries.py`), Plotly figures (`charts.py`) |
 

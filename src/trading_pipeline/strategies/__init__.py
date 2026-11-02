@@ -13,6 +13,9 @@ from trading_pipeline.strategies.base import (
     hold_signal,
     strategy_frame,
 )
+from trading_pipeline.strategies.donchian_breakout import DonchianBreakoutStrategy
+from trading_pipeline.strategies.indicathor import IndicathorStrategy
+from trading_pipeline.strategies.rsi2_pullback import Rsi2PullbackStrategy
 from trading_pipeline.strategies.sma_rsi import SmaRsiStrategy
 
 DEFAULT_STRATEGY = SmaRsiStrategy.name
@@ -20,6 +23,9 @@ DEFAULT_STRATEGY = SmaRsiStrategy.name
 # Register new strategies here.
 STRATEGIES: dict[str, type[Strategy]] = {
     SmaRsiStrategy.name: SmaRsiStrategy,
+    IndicathorStrategy.name: IndicathorStrategy,
+    Rsi2PullbackStrategy.name: Rsi2PullbackStrategy,
+    DonchianBreakoutStrategy.name: DonchianBreakoutStrategy,
 }
 
 
@@ -116,8 +122,11 @@ def _coerce(name: str, key: str, type_name: str, value: Any) -> Any:
 __all__ = [
     "DEFAULT_STRATEGY",
     "STRATEGIES",
+    "DonchianBreakoutStrategy",
     "History",
+    "IndicathorStrategy",
     "MarketContext",
+    "Rsi2PullbackStrategy",
     "SmaRsiStrategy",
     "Strategy",
     "available_strategies",

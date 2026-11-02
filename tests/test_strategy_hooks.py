@@ -7,7 +7,7 @@ from typing import ClassVar
 import pandas as pd
 import pytest
 
-from fakes import FakeBroker, RecordingNotifier, after_close, crossover_bars
+from fakes import FakeBroker, RecordingNotifier, after_close, crossover_bars, random_walk_bars
 from trading_pipeline import strategies
 from trading_pipeline.backtest.runner import BacktestConfig, run_strategy_backtest
 from trading_pipeline.decisions import decide, evaluate
@@ -210,7 +210,9 @@ def test_derived_columns_may_not_clash_with_features(trailing, monkeypatch):
 def test_every_registered_strategy_is_causal(name):
     """Indicators and derived columns at a bar never change when later bars arrive."""
     strategy = get_strategy(name)
-    bars = crossover_bars(149)
+    bars = random_walk_bars(400)
+    if name == "indicathor":
+        strategy = get_strategy(name, {"use_rs": True, "macd_flag_mode": "cross"})
     bench = strategy.benchmark_for("TEST", AssetClass.STOCK)
     bench_bars = benchmark_of(bars) if bench else None
     full = strategy_frame(strategy, bars, bench_bars, chart_features=False)

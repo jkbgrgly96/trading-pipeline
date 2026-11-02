@@ -1,25 +1,72 @@
 # Copy to watchlist.toml (or point WATCHLIST_PATH / --watchlist at your file).
 # Each [[watch]] entry is one strategy instance: symbol + asset class + timeframe.
 # With paper orders enabled, a symbol may appear only once (one paper position per symbol).
+# Only US-listed stocks/ETFs and Alpaca crypto pairs have data here.
 
 [defaults]
-limit = 250        # bars to fetch; must cover the strategy's min_bars
+limit = 300        # bars to fetch; must cover the strategy's min_bars (indicathor: 210)
 asset_class = "stock"
+timeframe = "1Day"
 strategy = "sma_rsi"  # any entry can override it with its own strategy = "..."
 # params = { fast = 10 }   # parameters for entries using the default strategy
 # Sizing (defaults from .env): sizing = "risk" | "notional", risk_per_trade,
 # max_notional, notional. Any entry can override them.
 
+# Broad market ETFs
+[[watch]]
+symbol = "SPY"
+
+[[watch]]
+symbol = "QQQ"
+
+[[watch]]
+symbol = "IWM"
+
+# Large caps across sectors
 [[watch]]
 symbol = "AAPL"
-timeframe = "1Day"
 
 [[watch]]
 symbol = "MSFT"
-timeframe = "1Day"
 
+[[watch]]
+symbol = "NVDA"
+
+[[watch]]
+symbol = "AMZN"
+
+[[watch]]
+symbol = "GOOGL"
+
+[[watch]]
+symbol = "META"
+
+[[watch]]
+symbol = "JPM"
+
+[[watch]]
+symbol = "XOM"
+
+[[watch]]
+symbol = "UNH"
+
+[[watch]]
+symbol = "HD"
+
+[[watch]]
+symbol = "KO"
+
+[[watch]]
+symbol = "LLY"
+
+[[watch]]
+symbol = "CAT"
+
+# Crypto trades around the clock; daily bars keep fees in check.
 [[watch]]
 symbol = "BTC/USD"
 asset_class = "crypto"
-timeframe = "1Hour"
-notional = 50
+
+[[watch]]
+symbol = "ETH/USD"
+asset_class = "crypto"

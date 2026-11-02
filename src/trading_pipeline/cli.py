@@ -51,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Process every watchlist entry once and exit (for Task Scheduler / cron).",
     )
+    mode.add_argument(
+        "--sweep",
+        action="store_true",
+        help="Tune --strategy over the watchlist: every --grid combination on --start..--split, "
+        "then the best few (plus defaults and sma_rsi) on --split..--end.",
+    )
 
     parser.add_argument("--symbol", help="Ticker or crypto pair, e.g. AAPL or BTC/USD.")
     parser.add_argument(
@@ -114,6 +120,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Send alerts to Telegram (needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID).",
     )
     parser.add_argument("--log-level", default="INFO", help="DEBUG, INFO, WARNING, ...")
+
+    sweep = parser.add_argument_group("sweep options")
+    sweep.add_argument(
+        "--grid",
+        action="append",
+        metavar="KEY=V1,V2",
+        help="Values to try for a strategy parameter, repeatable (default: a built-in grid).",
+    )
+    sweep.add_argument(
+        "--split", help="First out-of-sample date (default: 2024-01-01); tuning uses --start..--split."
+    )
+    sweep.add_argument("--top", type=int, default=5, help="Configurations re-run out of sample.")
+    sweep.add_argument(
+        "--min-trades",
+        type=int,
+        default=30,
+        help="Fewer in-sample trades (all entries together) cannot be a finalist.",
+    )
 
     backtest = parser.add_argument_group("backtest options")
     backtest.add_argument(
@@ -194,8 +218,10 @@ def main(argv: list[str] | None = None) -> int:
         max_open_positions = max_open_positions or None
         start = _parse_date(args.start)
         end = _parse_date(args.end, inclusive_end=True)
-        if (start or end) and not args.backtest:
-            raise ValueError("--start/--end only apply to --backtest.")
+        if (start or end) and not (args.backtest or args.sweep):
+            raise ValueError("--start/--end only apply to --backtest and --sweep.")
+        if args.sweep and not args.strategy:
+            raise ValueError("--sweep needs --strategy.")
         if start and end and start >= end:
             raise ValueError("--start must be before --end.")
     except ValueError as exc:
@@ -238,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         ]
 
-    if args.backtest:
+    if args.backtest or args.sweep:
         from trading_pipeline.watch import freeze_params, validate_watchlist
 
         items = watch_items(use_watchlist=args.symbol is None)
@@ -257,6 +283,11 @@ def main(argv: list[str] | None = None) -> int:
             validate_watchlist(items, orders_enabled=False)
         except ValueError as exc:
             parser.error(str(exc))
+        if args.sweep:
+            try:
+                return _run_sweep(args, broker, items, cli_params, start, end)
+            except ValueError as exc:
+                parser.error(str(exc))
         return _run_backtests(args, broker, storage, items, start, end)
 
     notifier = build_notifier(args.telegram, settings)
@@ -469,6 +500,121 @@ def _print_backtest_table(rows) -> None:
         )
     print("-" * len(header))
     print(f"{'total':<28} {'':<10} {total_trades:>6} {'':>6} {total_pnl:>10.2f}")
+
+
+def _run_sweep(args, broker, items: list[WatchItem], base_params: dict, start, end) -> int:
+    import csv
+    import json
+
+    from trading_pipeline.backtest.runner import fetch_backtest_bars
+    from trading_pipeline.backtest.sweep import (
+        SweepTarget,
+        parse_grid,
+        run_sweep,
+        valid_combinations,
+    )
+
+    strategy = args.strategy
+    grid = parse_grid(strategy, args.grid)
+    split = _parse_date(args.split) or datetime(2024, 1, 1, tzinfo=UTC)
+    start = start or split - timedelta(days=3 * 365)
+    if start >= split or (end is not None and split >= end):
+        raise ValueError("--sweep needs --start < --split < --end.")
+
+    candidates = valid_combinations(strategy, base_params, grid) or [base_params]
+    built = [get_strategy(strategy, params) for params in candidates]
+    min_bars = max([s.min_bars for s in built] + [get_strategy("sma_rsi").min_bars])
+    print(
+        f"Sweeping {strategy}: {len(candidates)} combinations x {len(items)} entries, "
+        f"in-sample {start:%Y-%m-%d}..{split:%Y-%m-%d}, out-of-sample {split:%Y-%m-%d}.."
+        f"{(end or datetime.now(UTC)):%Y-%m-%d}"
+    )
+
+    def fetch(symbol, item):
+        return fetch_backtest_bars(
+            broker, symbol, item.asset_class, item.timeframe, min_bars=min_bars,
+            limit=item.limit, start=start, end=end,
+        )
+
+    benchmark_cache: dict = {}
+    targets = []
+    for item in items:
+        benchmark = next(
+            (b for s in built if (b := s.benchmark_for(item.symbol, item.asset_class))), None
+        )
+        benchmark_bars = None
+        if benchmark:
+            key = (benchmark, item.asset_class, item.timeframe)
+            if key not in benchmark_cache:
+                benchmark_cache[key] = fetch(benchmark, item)
+            benchmark_bars = benchmark_cache[key]
+        targets.append(
+            SweepTarget(
+                symbol=item.symbol,
+                asset_class=item.asset_class,
+                timeframe=item.timeframe,
+                bars=fetch(item.symbol, item),
+                benchmark_bars=benchmark_bars,
+                notional=item.notional,
+                risk_per_trade=item.risk_per_trade if item.sizing.mode.value == "risk" else None,
+                max_notional=item.max_notional,
+            )
+        )
+
+    ranked, out_rows = run_sweep(
+        targets, strategy, grid, start, split, end, base_params=base_params, cash=args.cash,
+        top=args.top, min_trades=args.min_trades, progress=logger.info,
+    )
+    grid_keys = list(grid)
+    print(f"\nIn-sample ranking (by total P/L across entries, top 10 of {len(ranked)}):")
+    _print_sweep_rows(ranked[:10], grid_keys, out_of_sample=False)
+    print(f"\nOut-of-sample {split:%Y-%m-%d} onwards (not used for choosing):")
+    _print_sweep_rows(out_rows, grid_keys, out_of_sample=True)
+
+    path = Path("data/sweeps") / f"{datetime.now(UTC):%Y%m%dT%H%M%S}_{strategy}.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["phase", "label", "strategy", "params", "trades", "win_rate_pct", "pnl_usd",
+                         "avg_trade_pct", "profit_factor", "avg_buy_hold_pct", "errors"])
+        phases = [("in_sample", row, row.in_sample) for row in ranked]
+        phases += [("out_of_sample", row, row.out_of_sample) for row in out_rows]
+        for phase, row, summary in phases:
+            writer.writerow([
+                phase, row.label, row.strategy, json.dumps(row.params, sort_keys=True), summary.trades,
+                summary.win_rate, round(summary.pnl, 2), summary.avg_trade_pct, summary.profit_factor,
+                summary.avg_buy_hold_pct, "; ".join(summary.errors),
+            ])
+    print(f"\nAll results: {path}")
+    return 0
+
+
+def _print_sweep_rows(rows, grid_keys: list[str], out_of_sample: bool) -> None:
+    def params_text(row) -> str:
+        if row.label == "sma_rsi baseline":
+            return "sma_rsi, default parameters"
+        if row.label == "defaults":
+            return "default parameters"
+        return " ".join(f"{key}={row.params[key]}" for key in grid_keys if key in row.params)
+
+    width = min(110, max([len("params")] + [len(params_text(row)) for row in rows]))
+    header = f"{'':<18} {'params':<{width}} {'trades':>6} {'win %':>6} {'P/L $':>9} {'avg %':>6} {'PF':>5}"
+    if out_of_sample:
+        header += f" {'in P/L $':>9} {'B&H %':>7}"
+    print(header)
+    print("-" * len(header))
+    for row in rows:
+        summary = row.out_of_sample if out_of_sample else row.in_sample
+        line = (
+            f"{row.label:<18} {params_text(row)[:width]:<{width}} {summary.trades:>6} "
+            f"{_fmt(summary.win_rate, 1):>6} {summary.pnl:>9.2f} {_fmt(summary.avg_trade_pct, 2):>6} "
+            f"{_fmt(summary.profit_factor, 2):>5}"
+        )
+        if out_of_sample:
+            line += f" {row.in_sample.pnl:>9.2f} {_fmt(summary.avg_buy_hold_pct, 1):>7}"
+        print(line)
+        for error in summary.errors[:3]:
+            print(f"{'':<18} ! {error}")
 
 
 def _fmt(value, decimals: int) -> str:

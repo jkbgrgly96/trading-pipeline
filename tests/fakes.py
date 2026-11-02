@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 from datetime import UTC, datetime, timedelta
 
 from trading_pipeline.brokers.base import Broker, BrokerOrder, BrokerPosition
@@ -20,6 +21,21 @@ def crossover_bars(count: int = BUY_BAR_INDEX + 1) -> list[Bar]:
         Bar(START + timedelta(days=i), c - 0.2, c + 0.8, c - 0.8, c, 1_000)
         for i, c in enumerate(closes[:count])
     ]
+
+
+def random_walk_bars(
+    count: int = 600, seed: int = 7, drift: float = 0.0006, start: datetime = START
+) -> list[Bar]:
+    """Deterministic daily bars with trends, pullbacks and volume (for long-warm-up strategies)."""
+    rnd = random.Random(seed)
+    price, bars = 100.0, []
+    for i in range(count):
+        open_ = price
+        price *= math.exp(rnd.gauss(drift, 0.015) + 0.004 * math.sin(i / 40))
+        high = max(open_, price) * (1 + abs(rnd.gauss(0, 0.006)))
+        low = min(open_, price) * (1 - abs(rnd.gauss(0, 0.006)))
+        bars.append(Bar(start + timedelta(days=i), open_, high, low, price, 1_000 + rnd.random() * 1_000))
+    return bars
 
 
 def after_close(bars: list[Bar], timeframe: timedelta = timedelta(days=1)) -> datetime:
