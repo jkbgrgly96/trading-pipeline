@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+from trading_pipeline.dashboard import queries
 from trading_pipeline.dashboard.charts import (
     build_drawdown_chart,
     build_equity_curve_chart,
@@ -7,7 +8,6 @@ from trading_pipeline.dashboard.charts import (
     build_trade_overlay_chart,
     build_trade_pnl_chart,
 )
-from trading_pipeline.dashboard import queries
 from trading_pipeline.domain import AssetClass, Bar
 from trading_pipeline.features import compute_feature_frame, latest_snapshot, snapshot_from_frame
 from trading_pipeline.storage import Storage

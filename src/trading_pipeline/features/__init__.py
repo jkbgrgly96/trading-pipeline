@@ -3,6 +3,7 @@ from trading_pipeline.features.engine import (
     compute_feature_frame,
     latest_snapshot,
     snapshot_from_frame,
+    snapshots_from_frame,
 )
 from trading_pipeline.features.snapshot import FeatureSnapshot
 
@@ -13,4 +14,5 @@ __all__ = [
     "compute_feature_frame",
     "latest_snapshot",
     "snapshot_from_frame",
+    "snapshots_from_frame",
 ]

@@ -1,14 +1,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
 
-from trading_pipeline.domain import AssetClass, Bar, SignalAction
-from trading_pipeline.features import compute_feature_frame, snapshot_from_frame
+from trading_pipeline.decisions import decide
+from trading_pipeline.domain import AssetClass, Bar, DecisionAction, OpenPosition
+from trading_pipeline.features import compute_feature_frame, snapshots_from_frame
 from trading_pipeline.features.frame import bars_to_ohlcv_frame
-from trading_pipeline.strategies.sma_rsi import generate_signal_from_features
+from trading_pipeline.strategies.sma_rsi import MIN_BARS, generate_signal_from_features
+
+__all__ = [
+    "BacktestConfig",
+    "BacktestResult",
+    "bars_to_ohlcv_frame",
+    "default_costs",
+    "run_strategy_backtest",
+    "summarize_stats",
+]
+
+
+def default_costs(asset_class: AssetClass) -> tuple[float, float]:
+    """(commission, spread) defaults that are roughly realistic for Alpaca.
+
+    Stocks are commission-free but you still pay the bid/ask spread; crypto
+    has a taker fee of roughly 0.25% at the lowest volume tier.
+    """
+    if asset_class == AssetClass.CRYPTO:
+        return 0.0025, 0.0005
+    return 0.0, 0.0005
 
 
 @dataclass(frozen=True)
@@ -32,20 +54,15 @@ class BacktestResult:
 
 
 def run_strategy_backtest(bars: list[Bar], config: BacktestConfig) -> BacktestResult:
-    try:
-        from backtesting import Backtest
-        from backtesting.lib import FractionalBacktest
-    except ImportError as exc:
-        raise RuntimeError(
-            "backtesting.py is not installed. Run: pip install -e .[dev]"
-        ) from exc
+    from backtesting import Backtest
+    from backtesting.lib import FractionalBacktest
 
     feature_frame = compute_feature_frame(bars)
-    strategy = _build_strategy_class(config)
+    strategy = _build_strategy_class(config, feature_frame)
     backtest_class = (
         FractionalBacktest if config.asset_class == AssetClass.CRYPTO else Backtest
     )
-    backtest_kwargs = {
+    backtest_kwargs: dict[str, Any] = {
         "cash": config.cash,
         "commission": config.commission,
         "spread": config.spread,
@@ -83,8 +100,13 @@ def summarize_stats(stats: Any) -> dict[str, Any]:
     return {key: stats[key] for key in keys if key in stats}
 
 
-def _build_strategy_class(config: BacktestConfig):
+def _build_strategy_class(config: BacktestConfig, feature_frame: pd.DataFrame):
     from backtesting import Strategy
+
+    # Features are causal (verified: values at bar i do not change when later
+    # bars are added), so precomputing every snapshot once is safe and avoids
+    # rebuilding a snapshot from ~75 columns on every step.
+    snapshots = snapshots_from_frame(feature_frame)
 
     class SmaRsiBacktestingStrategy(Strategy):
         symbol = config.symbol
@@ -92,28 +114,42 @@ def _build_strategy_class(config: BacktestConfig):
         position_size = config.position_size
 
         def init(self) -> None:
-            pass
+            self._open: OpenPosition | None = None
 
         def next(self) -> None:
-            current_length = len(self.data)
-            if current_length < 60:
+            index = len(self.data) - 1
+            if index + 1 < MIN_BARS:
                 return
 
-            visible_frame = self.data.df.iloc[:current_length]
+            latest = snapshots[index]
             signal = generate_signal_from_features(
                 symbol=self.symbol,
                 asset_class=self.asset_class,
-                latest=snapshot_from_frame(visible_frame, -1),
-                previous=snapshot_from_frame(visible_frame, -2),
+                latest=latest,
+                previous=snapshots[index - 1],
             )
+            if not self.position:
+                # Closed by the engine (e.g. finalize) or never opened.
+                self._open = None
 
-            if signal.action == SignalAction.BUY and not self.position:
-                self.buy(
-                    size=self.position_size,
-                    sl=signal.stop_loss,
-                    tp=signal.take_profit,
+            decision = decide(signal, self._open, latest)
+            if decision.action == DecisionAction.ENTER_LONG and not self.position:
+                self.buy(size=self.position_size)
+                self._open = OpenPosition(
+                    symbol=self.symbol,
+                    asset_class=self.asset_class,
+                    timeframe="backtest",
+                    entry_price=latest.close,
+                    entry_time=_as_datetime(latest.timestamp),
+                    stop_loss=decision.stop_loss,
+                    take_profit=decision.take_profit,
                 )
-            elif signal.action == SignalAction.SELL and self.position:
+            elif decision.action == DecisionAction.EXIT_LONG and self.position:
                 self.position.close()
+                self._open = None
 
     return SmaRsiBacktestingStrategy
+
+
+def _as_datetime(value: Any) -> datetime:
+    return pd.Timestamp(value).to_pydatetime()

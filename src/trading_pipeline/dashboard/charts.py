@@ -16,6 +16,8 @@ def build_market_chart(
     show_rsi: bool = True,
     show_macd: bool = True,
     show_atr: bool = True,
+    positions: pd.DataFrame | None = None,
+    show_positions: bool = True,
 ) -> go.Figure:
     rows = _rows(show_rsi=show_rsi, show_macd=show_macd, show_atr=show_atr)
     row_heights = _row_heights(rows)
@@ -67,6 +69,10 @@ def build_market_chart(
             show_hold_signals=show_hold_signals,
             row=1,
         )
+        _add_decision_markers(figure, signals, row=1)
+
+    if show_positions and positions is not None and not positions.empty:
+        _add_position_levels(figure, positions, merged["timestamp"].max(), row=1)
 
     row_lookup = {key: index + 1 for index, (_, key) in enumerate(rows)}
     if show_rsi and "rsi" in row_lookup:
@@ -338,10 +344,12 @@ def _add_signal_markers(
     show_hold_signals: bool,
     row: int,
 ) -> None:
+    # Raw strategy signals are drawn small and faded; the decisions you were
+    # alerted about are drawn on top by _add_decision_markers.
     markers = {
-        "buy": {"symbol": "triangle-up", "color": "#16a34a", "size": 12},
-        "sell": {"symbol": "triangle-down", "color": "#dc2626", "size": 12},
-        "hold": {"symbol": "circle", "color": "#64748b", "size": 7},
+        "buy": {"symbol": "triangle-up-open", "color": "#16a34a", "size": 9},
+        "sell": {"symbol": "triangle-down-open", "color": "#dc2626", "size": 9},
+        "hold": {"symbol": "circle", "color": "#64748b", "size": 6},
     }
     for action, marker in markers.items():
         if action == "hold" and not show_hold_signals:
@@ -354,7 +362,7 @@ def _add_signal_markers(
                 x=subset["bar_timestamp"],
                 y=subset["latest_close"],
                 mode="markers",
-                name=action.upper(),
+                name=f"{action.upper()} signal",
                 text=subset.get("reason"),
                 marker={
                     "symbol": marker["symbol"],
@@ -395,3 +403,76 @@ def _add_trade_points(
             },
         )
     )
+
+
+DECISION_MARKERS = {
+    "enter_long": {"name": "ENTER (alert)", "symbol": "triangle-up", "color": "#15803d"},
+    "exit_long": {"name": "EXIT (alert)", "symbol": "x", "color": "#b91c1c"},
+}
+
+
+def _add_decision_markers(figure: go.Figure, signals: pd.DataFrame, row: int) -> None:
+    if "decision" not in signals.columns:
+        return
+    for decision, style in DECISION_MARKERS.items():
+        subset = signals[signals["decision"] == decision]
+        if subset.empty:
+            continue
+        figure.add_trace(
+            go.Scatter(
+                x=subset["bar_timestamp"],
+                y=subset["latest_close"],
+                mode="markers",
+                name=style["name"],
+                text=subset.get("decision_reason"),
+                hovertemplate="%{text}<extra>" + style["name"] + "</extra>",
+                marker={
+                    "symbol": style["symbol"],
+                    "color": style["color"],
+                    "size": 16,
+                    "line": {"color": "#ffffff", "width": 1.5},
+                },
+            ),
+            row=row,
+            col=1,
+        )
+
+
+def _add_position_levels(
+    figure: go.Figure,
+    positions: pd.DataFrame,
+    last_timestamp: pd.Timestamp,
+    row: int,
+) -> None:
+    """Entry, stop and target as segments spanning each position's lifetime."""
+    levels = [
+        ("entry_price", "Entry", "#2563eb", "solid"),
+        ("stop_loss", "Stop", "#dc2626", "dash"),
+        ("take_profit", "Target", "#16a34a", "dash"),
+    ]
+    for column, label, color, dash in levels:
+        xs: list = []
+        ys: list = []
+        for _, position in positions.iterrows():
+            level = position.get(column)
+            if level is None or pd.isna(level):
+                continue
+            end = position.get("exit_time")
+            if end is None or pd.isna(end):
+                end = last_timestamp
+            xs += [position["entry_time"], end, None]
+            ys += [level, level, None]
+        if not xs:
+            continue
+        figure.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="lines",
+                name=label,
+                line={"color": color, "width": 1.5, "dash": dash},
+                connectgaps=False,
+            ),
+            row=row,
+            col=1,
+        )

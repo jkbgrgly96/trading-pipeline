@@ -8,10 +8,23 @@ from trading_pipeline.features import (
     snapshot_from_frame,
 )
 
+# SMA 50 needs 50 bars, plus the previous bar for the crossover and some
+# warm-up for RSI smoothing.
+MIN_BARS = 60
+STOP_LOSS_PCT = 0.04
+TAKE_PROFIT_PCT = 0.08
+RSI_BUY_MAX = 70
+RSI_OVERBOUGHT = 75
+
+
+def risk_levels(entry_price: float) -> tuple[float, float]:
+    """Stop-loss and take-profit prices for a long entry at ``entry_price``."""
+    return entry_price * (1 - STOP_LOSS_PCT), entry_price * (1 + TAKE_PROFIT_PCT)
+
 
 def generate_signal(symbol: str, asset_class: AssetClass, bars: list[Bar]) -> Signal:
-    if len(bars) < 60:
-        raise ValueError("At least 60 bars are required for the default strategy.")
+    if len(bars) < MIN_BARS:
+        raise ValueError(f"At least {MIN_BARS} bars are required for the default strategy.")
 
     frame = compute_feature_frame(bars)
     return generate_signal_from_features(
@@ -53,12 +66,13 @@ def generate_signal_from_features(
     bullish_cross = previous.sma_20 <= previous.sma_50 and latest.sma_20 > latest.sma_50
     bearish_cross = previous.sma_20 >= previous.sma_50 and latest.sma_20 < latest.sma_50
 
-    if bullish_cross and latest.rsi_14 < 70:
+    if bullish_cross and latest.rsi_14 < RSI_BUY_MAX:
         confidence = 0.65
         reason_parts = ["sma20_crossed_above_sma50", f"rsi={latest.rsi_14:.1f}"]
         if bullish_patterns:
             confidence += 0.1
             reason_parts.append(f"bullish_candle_pattern={bullish_patterns[0]}")
+        stop_loss, take_profit = risk_levels(latest.close)
         return Signal(
             symbol=symbol,
             asset_class=asset_class,
@@ -67,11 +81,11 @@ def generate_signal_from_features(
             reason=", ".join(reason_parts),
             latest_close=latest.close,
             timestamp=latest.timestamp,
-            stop_loss=latest.close * 0.96,
-            take_profit=latest.close * 1.08,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
         )
 
-    if bearish_cross or latest.rsi_14 > 75:
+    if bearish_cross or latest.rsi_14 > RSI_OVERBOUGHT:
         confidence = 0.6
         reason_parts = ["bearish_or_overbought"]
         if bearish_cross:

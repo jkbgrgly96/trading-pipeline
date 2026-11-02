@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
-from trading_pipeline.brokers.base import Broker
-from trading_pipeline.domain import AssetClass, Bar, Signal, SignalAction
+from trading_pipeline.brokers.base import Broker, BrokerPosition
+from trading_pipeline.domain import AssetClass, Bar
+from trading_pipeline.timeframes import parse_timeframe
 
 
 class AlpacaBroker(Broker):
@@ -18,19 +19,22 @@ class AlpacaBroker(Broker):
         if not api_key or not secret_key:
             raise ValueError("ALPACA_API_KEY and ALPACA_SECRET_KEY must be set.")
 
-        try:
-            from alpaca.data.historical import CryptoHistoricalDataClient
-            from alpaca.data.historical import StockHistoricalDataClient
-            from alpaca.trading.client import TradingClient
-        except ImportError as exc:
-            raise RuntimeError(
-                "alpaca-py is not installed. Run: pip install -e ."
-            ) from exc
+        from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
+        from alpaca.trading.client import TradingClient
 
+        self._paper = bool(paper)
         self._stock_data_client = StockHistoricalDataClient(api_key, secret_key)
         self._crypto_data_client = CryptoHistoricalDataClient(api_key, secret_key)
-        self._trading_client = TradingClient(api_key, secret_key, paper=paper)
+        # Defence in depth: a live (real money) trading client is never
+        # created. Market data works with either key type.
+        self._trading_client = (
+            TradingClient(api_key, secret_key, paper=True) if self._paper else None
+        )
         self._stock_feed = _to_data_feed(stock_feed)
+
+    @property
+    def is_paper(self) -> bool:
+        return self._paper
 
     def get_bars(
         self,
@@ -39,97 +43,122 @@ class AlpacaBroker(Broker):
         timeframe: str,
         limit: int,
     ) -> list[Bar]:
+        parsed = parse_timeframe(timeframe)
         end = datetime.now(UTC)
-        start = end - _lookback_for(timeframe, limit)
+        start = end - parsed.lookback(asset_class, limit)
+
+        from alpaca.common.enums import Sort
 
         if asset_class == AssetClass.CRYPTO:
-            return self._get_crypto_bars(symbol, timeframe, start, end, limit)
-        return self._get_stock_bars(symbol, timeframe, start, end, limit)
+            from alpaca.data.requests import CryptoBarsRequest
 
-    def _get_stock_bars(
-        self,
-        symbol: str,
-        timeframe: str,
-        start: datetime,
-        end: datetime,
-        limit: int,
-    ) -> list[Bar]:
-        from alpaca.common.enums import Sort
-        from alpaca.data.requests import StockBarsRequest
+            request = CryptoBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=parsed.to_alpaca(),
+                start=start,
+                end=end,
+                limit=limit,
+                sort=Sort.DESC,
+            )
+            response = self._crypto_data_client.get_crypto_bars(request)
+        else:
+            from alpaca.data.requests import StockBarsRequest
 
-        request = StockBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=_to_alpaca_timeframe(timeframe),
-            start=start,
-            end=end,
-            limit=limit,
-            sort=Sort.DESC,
-            feed=self._stock_feed,
-        )
-        response = self._stock_data_client.get_stock_bars(request)
+            request = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=parsed.to_alpaca(),
+                start=start,
+                end=end,
+                limit=limit,
+                sort=Sort.DESC,
+                feed=self._stock_feed,
+            )
+            response = self._stock_data_client.get_stock_bars(request)
         return _extract_bars(response, symbol)
 
-    def _get_crypto_bars(
-        self,
-        symbol: str,
-        timeframe: str,
-        start: datetime,
-        end: datetime,
-        limit: int,
-    ) -> list[Bar]:
-        from alpaca.common.enums import Sort
-        from alpaca.data.requests import CryptoBarsRequest
+    # --- trading (paper only) -------------------------------------------
 
-        request = CryptoBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=_to_alpaca_timeframe(timeframe),
-            start=start,
-            end=end,
-            limit=limit,
-            sort=Sort.DESC,
+    @property
+    def _trading(self) -> Any:
+        self.ensure_paper()
+        return self._trading_client
+
+    def get_position(self, symbol: str, asset_class: AssetClass) -> BrokerPosition | None:
+        from alpaca.common.exceptions import APIError
+
+        try:
+            position = self._trading.get_open_position(_position_symbol(symbol))
+        except APIError as exc:
+            if _status_code(exc) == 404:
+                return None
+            raise
+        quantity = float(position.qty)
+        if quantity <= 0:
+            # A short (or zero) position is not something this long-only
+            # pipeline manages; treat it as flat for entry/exit purposes.
+            return None
+        return BrokerPosition(
+            symbol=symbol,
+            quantity=quantity,
+            avg_entry_price=float(position.avg_entry_price),
         )
-        response = self._crypto_data_client.get_crypto_bars(request)
-        return _extract_bars(response, symbol)
 
-    def submit_signal_order(self, signal: Signal, notional: float) -> str:
-        if signal.action == SignalAction.HOLD:
-            raise ValueError("HOLD signals cannot be submitted as orders.")
-
+    def submit_market_buy(self, symbol: str, asset_class: AssetClass, notional: float) -> str:
+        self.ensure_paper()
         from alpaca.trading.enums import OrderSide, TimeInForce
         from alpaca.trading.requests import MarketOrderRequest
 
-        side = OrderSide.BUY if signal.action == SignalAction.BUY else OrderSide.SELL
-        time_in_force = (
-            TimeInForce.GTC
-            if signal.asset_class == AssetClass.CRYPTO
-            else TimeInForce.DAY
-        )
+        # Notional (fractional) stock orders must be DAY; crypto uses GTC.
+        time_in_force = TimeInForce.GTC if asset_class == AssetClass.CRYPTO else TimeInForce.DAY
         request = MarketOrderRequest(
-            symbol=signal.symbol,
-            notional=notional,
-            side=side,
+            symbol=symbol,
+            notional=round(notional, 2),
+            side=OrderSide.BUY,
             time_in_force=time_in_force,
         )
-        order = self._trading_client.submit_order(order_data=request)
+        order = self._trading.submit_order(order_data=request)
         return str(order.id)
 
+    def close_position(self, symbol: str, asset_class: AssetClass) -> str | None:
+        self.ensure_paper()
+        from alpaca.common.exceptions import APIError
 
-def _to_alpaca_timeframe(value: str) -> Any:
-    from alpaca.data.timeframe import TimeFrame
+        try:
+            order = self._trading.close_position(_position_symbol(symbol))
+        except APIError as exc:
+            if _status_code(exc) == 404:
+                return None
+            raise
+        return str(order.id)
 
-    normalized = value.strip().lower()
-    mapping = {
-        "1min": TimeFrame.Minute,
-        "1minute": TimeFrame.Minute,
-        "1hour": TimeFrame.Hour,
-        "1h": TimeFrame.Hour,
-        "1day": TimeFrame.Day,
-        "1d": TimeFrame.Day,
-    }
+    def cancel_order(self, order_id: str) -> None:
+        self.ensure_paper()
+        from alpaca.common.exceptions import APIError
+
+        try:
+            self._trading.cancel_order_by_id(order_id)
+        except APIError as exc:
+            # 404: unknown order; 422: already filled/canceled. Nothing to do.
+            if _status_code(exc) in {404, 422}:
+                return
+            raise
+
+    def get_order_status(self, order_id: str) -> str:
+        order = self._trading.get_order_by_id(order_id)
+        status = order.status
+        return str(getattr(status, "value", status)).lower()
+
+
+def _position_symbol(symbol: str) -> str:
+    # Alpaca positions use "BTCUSD" for the "BTC/USD" pair.
+    return symbol.replace("/", "")
+
+
+def _status_code(exc: Exception) -> int | None:
     try:
-        return mapping[normalized]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported timeframe: {value}") from exc
+        return int(exc.status_code)  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _to_data_feed(value: str) -> Any:
@@ -148,15 +177,6 @@ def _to_data_feed(value: str) -> Any:
         return mapping[normalized]
     except KeyError as exc:
         raise ValueError(f"Unsupported Alpaca stock feed: {value}") from exc
-
-
-def _lookback_for(timeframe: str, limit: int) -> timedelta:
-    normalized = timeframe.strip().lower()
-    if normalized in {"1min", "1minute"}:
-        return timedelta(minutes=max(limit * 3, 300))
-    if normalized in {"1hour", "1h"}:
-        return timedelta(hours=max(limit * 3, 240))
-    return timedelta(days=max(limit * 3, 365))
 
 
 def _extract_bars(response: Any, symbol: str) -> list[Bar]:

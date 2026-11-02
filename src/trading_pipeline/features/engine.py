@@ -23,28 +23,45 @@ def latest_snapshot(frame: pd.DataFrame) -> FeatureSnapshot:
     return snapshot_from_frame(frame, -1)
 
 
+OHLCV_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
+
+
 def snapshot_from_frame(frame: pd.DataFrame, index: int = -1) -> FeatureSnapshot:
     if frame.empty:
         raise ValueError("Cannot build a feature snapshot from an empty frame.")
 
     row = frame.iloc[index]
-    timestamp = frame.index[index].to_pydatetime()
+    return _snapshot_from_mapping(frame.index[index], row.to_dict())
+
+
+def snapshots_from_frame(frame: pd.DataFrame) -> list[FeatureSnapshot]:
+    """Build a snapshot for every row; much faster than repeated iloc lookups."""
+    if frame.empty:
+        return []
+    records = frame.to_dict(orient="records")
+    return [
+        _snapshot_from_mapping(timestamp, record)
+        for timestamp, record in zip(frame.index, records, strict=True)
+    ]
+
+
+def _snapshot_from_mapping(timestamp, row: dict) -> FeatureSnapshot:
     values: dict[str, float | None] = {}
     patterns: list[str] = []
 
     for column, raw_value in row.items():
-        if column in {"Open", "High", "Low", "Close", "Volume"}:
+        if column in OHLCV_COLUMNS:
             continue
         if column.startswith("pattern__"):
             value = normalize_numeric(raw_value)
-            if value and value != 0:
+            if value:
                 direction = "bullish" if value > 0 else "bearish"
                 patterns.append(f"{direction}_{column.removeprefix('pattern__')}")
             continue
         values[column] = normalize_numeric(raw_value)
 
     return FeatureSnapshot(
-        timestamp=timestamp,
+        timestamp=pd.Timestamp(timestamp).to_pydatetime(),
         open=float(row["Open"]),
         high=float(row["High"]),
         low=float(row["Low"]),

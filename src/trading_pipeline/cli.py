@@ -1,81 +1,127 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
+from datetime import timedelta
+from pathlib import Path
 
-from trading_pipeline.backtest.runner import (
-    BacktestConfig,
-    run_strategy_backtest,
-    summarize_stats,
-)
-from trading_pipeline.brokers.alpaca import AlpacaBroker
 from trading_pipeline.config import Settings, load_settings
 from trading_pipeline.domain import AssetClass
+from trading_pipeline.notifications.base import MultiNotifier, Notifier
 from trading_pipeline.notifications.console import ConsoleNotifier
-from trading_pipeline.notifications.telegram import TelegramNotifier
-from trading_pipeline.pipeline import run_once
 from trading_pipeline.storage import Storage
+from trading_pipeline.timeframes import parse_timeframe
+
+logger = logging.getLogger("trading_pipeline")
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the trading alert pipeline.")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Alert-first trading pipeline. By default runs one alert pass. "
+            "Use --watch to keep running over a watchlist, or --backtest."
+        )
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--backtest", action="store_true", help="Run a historical backtest.")
+    mode.add_argument(
+        "--watch",
+        action="store_true",
+        help="Run continuously over the watchlist and alert on every closed bar.",
+    )
+    mode.add_argument(
+        "--once",
+        action="store_true",
+        help="Process every watchlist entry once and exit (for Task Scheduler / cron).",
+    )
+
     parser.add_argument("--symbol", help="Ticker or crypto pair, e.g. AAPL or BTC/USD.")
     parser.add_argument(
         "--asset-class",
         choices=[item.value for item in AssetClass],
         help="Asset class to request from Alpaca.",
     )
-    parser.add_argument("--timeframe", help="Supported: 1Min, 1Hour, 1Day.")
+    parser.add_argument("--timeframe", help="e.g. 1Min, 5Min, 15Min, 1Hour, 4Hour, 1Day.")
     parser.add_argument("--limit", type=int, help="Number of bars to request.")
-    parser.add_argument("--notional", type=float, help="Paper order notional size.")
+    parser.add_argument("--notional", type=float, help="Paper order size in USD.")
     parser.add_argument(
-        "--backtest",
-        action="store_true",
-        help="Run a historical backtest instead of a live alert pass.",
+        "--watchlist",
+        help="TOML watchlist for --watch/--once (default: WATCHLIST_PATH or watchlist.toml). "
+        "Falls back to --symbol/--timeframe when the file does not exist.",
     )
-    parser.add_argument("--cash", type=float, default=10_000.0, help="Backtest cash.")
     parser.add_argument(
+        "--interval",
+        type=int,
+        help="Seconds between watch cycles (default: shortest timeframe, 60s-900s).",
+    )
+    parser.add_argument(
+        "--notify-hold",
+        action="store_true",
+        help="Also send a notification when there is nothing to do.",
+    )
+    parser.add_argument(
+        "--telegram",
+        action="store_true",
+        help="Send alerts to Telegram (needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID).",
+    )
+    parser.add_argument("--log-level", default="INFO", help="DEBUG, INFO, WARNING, ...")
+
+    backtest = parser.add_argument_group("backtest options")
+    backtest.add_argument("--cash", type=float, default=10_000.0, help="Backtest cash.")
+    backtest.add_argument(
         "--commission",
         type=float,
-        default=0.0,
-        help="Backtest commission rate, e.g. 0.001 for 0.1%%.",
+        help="Commission rate, e.g. 0.001 for 0.1%%. Default: 0 for stocks, 0.0025 for crypto.",
     )
-    parser.add_argument(
-        "--spread",
-        type=float,
-        default=0.0,
-        help="Backtest spread rate, e.g. 0.0002.",
+    backtest.add_argument(
+        "--spread", type=float, help="Spread rate. Default: 0.0005 (5 bps)."
     )
-    parser.add_argument(
+    backtest.add_argument(
         "--position-size",
         type=float,
         default=0.95,
-        help="Fraction of available equity to use on BUY signals.",
+        help="Fraction of equity per entry (0 < size < 1).",
     )
-    parser.add_argument(
+    backtest.add_argument(
         "--trade-on-close",
         action="store_true",
-        help="Execute backtest trades on bar close instead of next bar open.",
+        help="Fill at the signal bar's close instead of the next bar's open.",
     )
-    parser.add_argument(
+    backtest.add_argument(
         "--fractional-unit",
         type=float,
         default=0.00000001,
         help="Backtesting.py fractional unit for crypto backtests.",
     )
-    parser.add_argument(
-        "--telegram",
-        action="store_true",
-        help="Send Telegram alert when TELEGRAM_* env vars are configured.",
-    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     settings = load_settings()
     symbol = args.symbol or settings.default_symbol
     asset_class = AssetClass(args.asset_class or settings.default_asset_class)
     timeframe = args.timeframe or settings.default_timeframe
-    limit = args.limit or settings.default_bar_limit
-    notional = args.notional or settings.default_notional
+    limit = args.limit if args.limit is not None else settings.default_bar_limit
+    notional = args.notional if args.notional is not None else settings.default_notional
+
+    try:
+        parse_timeframe(timeframe)
+        if not 0 < args.position_size <= 1:
+            raise ValueError("--position-size must be in (0, 1].")
+        if limit <= 0 or notional <= 0:
+            raise ValueError("--limit and --notional must be positive.")
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    from trading_pipeline.brokers.alpaca import AlpacaBroker
 
     broker = AlpacaBroker(
         api_key=settings.alpaca_api_key,
@@ -87,47 +133,42 @@ def main(argv: list[str] | None = None) -> int:
     storage.initialize()
 
     if args.backtest:
-        backtest_config = BacktestConfig(
-            symbol=symbol,
-            asset_class=asset_class,
-            cash=args.cash,
-            commission=args.commission,
-            spread=args.spread,
-            position_size=args.position_size,
-            trade_on_close=args.trade_on_close,
-            fractional_unit=args.fractional_unit,
+        return _run_backtest(args, broker, storage, symbol, asset_class, timeframe, limit)
+
+    notifier = build_notifier(args.telegram, settings)
+    _log_mode(settings)
+    notify_hold = args.notify_hold or settings.notify_hold
+
+    if args.watch or args.once:
+        from trading_pipeline.watch import Watcher, WatchItem, load_watchlist
+
+        watchlist_path = Path(args.watchlist or settings.watchlist_path)
+        if watchlist_path.exists():
+            items = load_watchlist(watchlist_path, limit, notional)
+        else:
+            if args.watchlist:
+                parser.error(f"Watchlist not found: {watchlist_path}")
+            items = [WatchItem(symbol, asset_class, timeframe, limit, notional)]
+        watcher = Watcher(
+            broker=broker,
+            storage=storage,
+            notifier=notifier,
+            items=items,
+            orders_enabled=settings.orders_enabled,
+            notify_hold=notify_hold,
         )
-        bars = broker.get_bars(
-            symbol=symbol,
-            asset_class=asset_class,
-            timeframe=timeframe,
-            limit=limit,
-        )
-        result = run_strategy_backtest(
-            bars=bars,
-            config=backtest_config,
-        )
-        storage.save_market_bars(symbol, asset_class, timeframe, bars, source="alpaca")
-        storage.save_feature_snapshots(
-            symbol,
-            asset_class,
-            timeframe,
-            result.feature_frame,
-        )
-        backtest_run_id = storage.save_backtest(
-            symbol=symbol,
-            asset_class=asset_class,
-            timeframe=timeframe,
-            bar_limit=limit,
-            config=backtest_config,
-            result=result,
-        )
-        _print_backtest_summary(summarize_stats(result.stats))
-        print(f"backtest_run_id={backtest_run_id}")
+        if args.once:
+            outcomes = watcher.run_cycle()
+            for label, outcome in outcomes.items():
+                print(f"{label}: {outcome}")
+            return 1 if "error" in outcomes.values() else 0
+        interval = timedelta(seconds=args.interval) if args.interval else None
+        watcher.run_forever(interval=interval)
         return 0
 
-    notifier = _build_notifier(args.telegram, settings)
+    from trading_pipeline.pipeline import flush_outbox, run_once
 
+    flush_outbox(storage, notifier)
     result = run_once(
         broker=broker,
         notifier=notifier,
@@ -138,29 +179,79 @@ def main(argv: list[str] | None = None) -> int:
         orders_enabled=settings.orders_enabled,
         notional=notional,
         storage=storage,
+        notify_hold=notify_hold,
     )
-
-    if result.order_id:
-        print(f"paper_order_id={result.order_id}")
-    else:
-        print("order_submission=disabled_or_not_actionable")
-
+    if result.status == "already_processed":
+        print(f"bar {result.bar_timestamp.isoformat()} already processed; nothing to do")
+    elif result.decision is not None:
+        print(f"decision={result.decision.action.value} reason={result.decision.reason}")
+        if result.order_id:
+            print(f"paper_order_id={result.order_id}")
     return 0
 
 
-def _build_notifier(use_telegram: bool, settings: Settings):
-    if (
-        use_telegram
-        and settings.telegram_bot_token
-        and settings.telegram_chat_id
-    ):
-        return TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
-    return ConsoleNotifier()
+def build_notifier(use_telegram: bool, settings: Settings) -> Notifier:
+    console = ConsoleNotifier()
+    if not use_telegram:
+        return console
+    if not (settings.telegram_bot_token and settings.telegram_chat_id):
+        raise SystemExit("--telegram needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.")
+    from trading_pipeline.notifications.telegram import TelegramNotifier
+
+    telegram = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+    return MultiNotifier([telegram], optional=[console])
 
 
-def _print_backtest_summary(summary: dict[str, object]) -> None:
-    for key, value in summary.items():
+def _log_mode(settings: Settings) -> None:
+    if settings.orders_enabled:
+        logger.warning("PAPER ORDERS ENABLED: decisions will place orders on the Alpaca paper account.")
+    else:
+        logger.info("Alerts only: no orders will be placed.")
+    if not settings.alpaca_paper:
+        logger.warning("ALPACA_PAPER=false: trading endpoints are disabled; only market data is used.")
+
+
+def _run_backtest(args, broker, storage, symbol, asset_class, timeframe, limit) -> int:
+    from trading_pipeline.backtest.runner import (
+        BacktestConfig,
+        default_costs,
+        run_strategy_backtest,
+        summarize_stats,
+    )
+
+    default_commission, default_spread = default_costs(asset_class)
+    config = BacktestConfig(
+        symbol=symbol,
+        asset_class=asset_class,
+        cash=args.cash,
+        commission=args.commission if args.commission is not None else default_commission,
+        spread=args.spread if args.spread is not None else default_spread,
+        position_size=args.position_size,
+        trade_on_close=args.trade_on_close,
+        fractional_unit=args.fractional_unit,
+    )
+    from datetime import UTC, datetime
+
+    from trading_pipeline.timeframes import closed_bars
+
+    bars = broker.get_bars(symbol=symbol, asset_class=asset_class, timeframe=timeframe, limit=limit)
+    bars = closed_bars(bars, parse_timeframe(timeframe), datetime.now(UTC))
+    result = run_strategy_backtest(bars=bars, config=config)
+    storage.save_market_bars(symbol, asset_class, timeframe, bars, source="alpaca")
+    storage.save_feature_snapshots(symbol, asset_class, timeframe, result.feature_frame)
+    run_id = storage.save_backtest(
+        symbol=symbol,
+        asset_class=asset_class,
+        timeframe=timeframe,
+        bar_limit=limit,
+        config=config,
+        result=result,
+    )
+    for key, value in summarize_stats(result.stats).items():
         print(f"{key}={value}")
+    print(f"commission={config.commission} spread={config.spread}")
+    print(f"backtest_run_id={run_id}")
+    return 0
 
 
 if __name__ == "__main__":
