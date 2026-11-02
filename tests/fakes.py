@@ -42,6 +42,7 @@ class FakeBroker(Broker):
         self.closes: list[str] = []
         self.canceled: list[str] = []
         self.fail_orders = False
+        self.range_requests: list[tuple] = []
         self._order_seq = 0
 
     @property
@@ -50,6 +51,10 @@ class FakeBroker(Broker):
 
     def get_bars(self, symbol, asset_class, timeframe, limit):
         return list(self.bars[-limit:])
+
+    def get_bars_between(self, symbol, asset_class, timeframe, start, end):
+        self.range_requests.append((symbol, start, end))
+        return [bar for bar in self.bars if start <= bar.timestamp < end]
 
     def get_position(self, symbol, asset_class):
         return self.positions.get(symbol)

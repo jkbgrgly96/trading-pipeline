@@ -23,7 +23,7 @@ from trading_pipeline.features import FeatureSnapshot, snapshots_from_frame
 if TYPE_CHECKING:
     from trading_pipeline.backtest.runner import BacktestConfig, BacktestResult
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Storage:
@@ -70,6 +70,8 @@ class Storage:
                     _migrate_to_v2(connection)
                 if version < 3:
                     _migrate_to_v3(connection)
+                if version < 4:
+                    _migrate_to_v4(connection)
                 if version < SCHEMA_VERSION:
                     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 connection.execute("COMMIT")
@@ -504,9 +506,9 @@ class Storage:
                     created_at, symbol, asset_class, timeframe, bar_limit, cash,
                     commission, spread, position_size, start, end, return_pct,
                     buy_hold_return_pct, max_drawdown_pct, sharpe_ratio,
-                    trade_count, win_rate_pct, stats_json, strategy
+                    trade_count, win_rate_pct, stats_json, strategy, sizing, notional
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _now(),
@@ -517,7 +519,10 @@ class Storage:
                     config.cash,
                     config.commission,
                     config.spread,
-                    config.position_size,
+                    # With notional sizing: the share of starting cash each entry uses.
+                    config.position_size
+                    if config.position_size is not None
+                    else config.notional / config.cash,
                     _to_storage_value(summary.get("Start")),
                     _to_storage_value(summary.get("End")),
                     _to_storage_value(summary.get("Return [%]")),
@@ -528,6 +533,8 @@ class Storage:
                     _to_storage_value(summary.get("Win Rate [%]")),
                     _json(summary),
                     config.strategy,
+                    config.sizing,
+                    config.notional if config.position_size is None else None,
                 ),
             )
             run_id = int(cursor.lastrowid)
@@ -689,6 +696,18 @@ def _migrate_to_v3(connection: sqlite3.Connection) -> None:
     for table in ("signals", "positions", "backtest_runs"):
         connection.execute(f"ALTER TABLE {table} ADD COLUMN strategy TEXT")
         connection.execute(f"UPDATE {table} SET strategy = 'sma_rsi'")
+
+
+def _migrate_to_v4(connection: sqlite3.Connection) -> None:
+    """Record how backtest entries were sized.
+
+    ``sizing`` is ``notional`` (fixed USD per entry, like paper orders; the
+    amount is in ``notional``) or ``equity_fraction`` (``position_size`` of
+    current equity). Every run before v4 used ``equity_fraction``.
+    """
+    connection.execute("ALTER TABLE backtest_runs ADD COLUMN sizing TEXT")
+    connection.execute("ALTER TABLE backtest_runs ADD COLUMN notional REAL")
+    connection.execute("UPDATE backtest_runs SET sizing = 'equity_fraction'")
 
 
 def _execute_script(connection: sqlite3.Connection, script: str) -> None:

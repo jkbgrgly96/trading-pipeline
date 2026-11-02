@@ -429,6 +429,8 @@ def _render_backtests(st, database_path: Path, selected: dict, start: str | None
         "symbol",
         "timeframe",
         "strategy",
+        "sizing",
+        "notional",
         "bar_limit",
         "commission",
         "spread",

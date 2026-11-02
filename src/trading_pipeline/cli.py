@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from trading_pipeline.config import Settings, load_settings
 from trading_pipeline.domain import AssetClass
@@ -13,6 +15,9 @@ from trading_pipeline.notifications.console import ConsoleNotifier
 from trading_pipeline.storage import Storage
 from trading_pipeline.strategies import available_strategies, get_strategy
 from trading_pipeline.timeframes import parse_timeframe
+
+if TYPE_CHECKING:
+    from trading_pipeline.watch import WatchItem
 
 logger = logging.getLogger("trading_pipeline")
 
@@ -25,7 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--backtest", action="store_true", help="Run a historical backtest.")
+    mode.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Run a historical backtest of --symbol, or of every watchlist entry when "
+        "--symbol is not given.",
+    )
     mode.add_argument(
         "--watch",
         action="store_true",
@@ -51,7 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: DEFAULT_STRATEGY or sma_rsi).",
     )
     parser.add_argument("--limit", type=int, help="Number of bars to request.")
-    parser.add_argument("--notional", type=float, help="Paper order size in USD.")
+    parser.add_argument(
+        "--notional", type=float, help="USD per paper order, and per backtest entry."
+    )
     parser.add_argument(
         "--watchlist",
         help="TOML watchlist for --watch/--once (default: WATCHLIST_PATH or watchlist.toml). "
@@ -75,6 +87,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-level", default="INFO", help="DEBUG, INFO, WARNING, ...")
 
     backtest = parser.add_argument_group("backtest options")
+    backtest.add_argument(
+        "--start",
+        help="First date to trade, e.g. 2021-01-01 (earlier bars are fetched for indicator "
+        "warm-up). Without it, the latest --limit bars are used.",
+    )
+    backtest.add_argument(
+        "--end", help="Last date to trade, inclusive, e.g. 2025-12-31 (default: now)."
+    )
     backtest.add_argument("--cash", type=float, default=10_000.0, help="Backtest cash.")
     backtest.add_argument(
         "--commission",
@@ -87,8 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument(
         "--position-size",
         type=float,
-        default=0.95,
-        help="Fraction of equity per entry (0 < size < 1).",
+        help="Size entries as this fraction of current equity (0 < size <= 1, compounding) "
+        "instead of --notional USD like paper orders.",
     )
     backtest.add_argument(
         "--trade-on-close",
@@ -99,7 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--fractional-unit",
         type=float,
         default=0.00000001,
-        help="Backtesting.py fractional unit for crypto backtests.",
+        help="Smallest tradable fraction of a share or coin in backtests.",
     )
     return parser
 
@@ -123,10 +143,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         parse_timeframe(timeframe)
         strategy = get_strategy(strategy_name)
-        if not 0 < args.position_size <= 1:
+        if args.position_size is not None and not 0 < args.position_size <= 1:
             raise ValueError("--position-size must be in (0, 1].")
         if limit <= 0 or notional <= 0:
             raise ValueError("--limit and --notional must be positive.")
+        start = _parse_date(args.start)
+        end = _parse_date(args.end, inclusive_end=True)
+        if (start or end) and not args.backtest:
+            raise ValueError("--start/--end only apply to --backtest.")
+        if start and end and start >= end:
+            raise ValueError("--start must be before --end.")
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -137,32 +163,46 @@ def main(argv: list[str] | None = None) -> int:
         secret_key=settings.alpaca_secret_key,
         paper=settings.alpaca_paper,
         stock_feed=settings.alpaca_stock_feed,
+        adjustment=settings.alpaca_adjustment,
     )
     storage = Storage(settings.database_path)
     storage.initialize()
 
+    def watch_items(use_watchlist: bool) -> list[WatchItem]:
+        from trading_pipeline.watch import WatchItem, load_watchlist
+
+        watchlist_path = Path(args.watchlist or settings.watchlist_path)
+        if use_watchlist and watchlist_path.exists():
+            return load_watchlist(watchlist_path, limit, notional, strategy_name)
+        if use_watchlist and args.watchlist:
+            parser.error(f"Watchlist not found: {watchlist_path}")
+        return [WatchItem(symbol, asset_class, timeframe, limit, notional, strategy_name)]
+
     if args.backtest:
-        return _run_backtest(args, broker, storage, symbol, asset_class, timeframe, limit, strategy_name)
+        items = watch_items(use_watchlist=args.symbol is None)
+        if args.limit is not None:
+            # History length is a backtest setting: --limit applies to every entry.
+            items = [replace(item, limit=args.limit) for item in items]
+        try:
+            from trading_pipeline.watch import validate_watchlist
+
+            validate_watchlist(items, orders_enabled=False)
+        except ValueError as exc:
+            parser.error(str(exc))
+        return _run_backtests(args, broker, storage, items, start, end)
 
     notifier = build_notifier(args.telegram, settings)
     _log_mode(settings)
     notify_hold = args.notify_hold or settings.notify_hold
 
     if args.watch or args.once:
-        from trading_pipeline.watch import Watcher, WatchItem, load_watchlist
+        from trading_pipeline.watch import Watcher
 
-        watchlist_path = Path(args.watchlist or settings.watchlist_path)
-        if watchlist_path.exists():
-            items = load_watchlist(watchlist_path, limit, notional, strategy_name)
-        else:
-            if args.watchlist:
-                parser.error(f"Watchlist not found: {watchlist_path}")
-            items = [WatchItem(symbol, asset_class, timeframe, limit, notional, strategy_name)]
         watcher = Watcher(
             broker=broker,
             storage=storage,
             notifier=notifier,
-            items=items,
+            items=watch_items(use_watchlist=True),
             orders_enabled=settings.orders_enabled,
             notify_hold=notify_hold,
         )
@@ -221,48 +261,131 @@ def _log_mode(settings: Settings) -> None:
         logger.warning("ALPACA_PAPER=false: trading endpoints are disabled; only market data is used.")
 
 
-def _run_backtest(args, broker, storage, symbol, asset_class, timeframe, limit, strategy_name) -> int:
+def _parse_date(value: str | None, inclusive_end: bool = False) -> datetime | None:
+    """ISO date or datetime, UTC unless it carries an offset.
+
+    A date-only end (``2025-12-31``) includes that whole day.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"Invalid date {value!r}; use YYYY-MM-DD.") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    if inclusive_end and len(value.strip()) == 10:
+        parsed += timedelta(days=1)
+    return parsed
+
+
+def _run_backtests(args, broker, storage, items: list[WatchItem], start, end) -> int:
+    rows = []
+    for item in items:
+        try:
+            run_id, config, summary = _backtest_item(args, broker, storage, item, start, end)
+        except Exception as exc:  # noqa: BLE001 - one bad symbol must not stop the rest
+            logger.error("Backtest failed for %s: %s", item.label, exc)
+            logger.debug("Backtest traceback", exc_info=True)
+            rows.append((item, None, None, None))
+            continue
+        rows.append((item, run_id, config, summary))
+
+    if len(rows) == 1 and rows[0][1] is not None:
+        _, run_id, config, summary = rows[0]
+        for key, value in summary.items():
+            print(f"{key}={value}")
+        print(
+            f"strategy={config.strategy} sizing={config.sizing} notional={config.notional:g} "
+            f"commission={config.commission} spread={config.spread}"
+        )
+        print(f"backtest_run_id={run_id}")
+    else:
+        _print_backtest_table(rows)
+    return 1 if any(run_id is None for _, run_id, _, _ in rows) else 0
+
+
+def _backtest_item(args, broker, storage, item: WatchItem, start, end):
     from trading_pipeline.backtest.runner import (
         BacktestConfig,
         default_costs,
+        fetch_backtest_bars,
         run_strategy_backtest,
         summarize_stats,
     )
 
-    default_commission, default_spread = default_costs(asset_class)
+    default_commission, default_spread = default_costs(item.asset_class)
     config = BacktestConfig(
-        symbol=symbol,
-        asset_class=asset_class,
-        strategy=strategy_name,
+        symbol=item.symbol,
+        asset_class=item.asset_class,
+        strategy=item.strategy,
         cash=args.cash,
         commission=args.commission if args.commission is not None else default_commission,
         spread=args.spread if args.spread is not None else default_spread,
+        notional=item.notional,
         position_size=args.position_size,
         trade_on_close=args.trade_on_close,
         fractional_unit=args.fractional_unit,
+        start=start,
     )
-    from datetime import UTC, datetime
-
-    from trading_pipeline.timeframes import closed_bars
-
-    bars = broker.get_bars(symbol=symbol, asset_class=asset_class, timeframe=timeframe, limit=limit)
-    bars = closed_bars(bars, parse_timeframe(timeframe), datetime.now(UTC))
+    config.validate()
+    bars = fetch_backtest_bars(
+        broker,
+        item.symbol,
+        item.asset_class,
+        item.timeframe,
+        min_bars=get_strategy(item.strategy).min_bars,
+        limit=item.limit,
+        start=start,
+        end=end,
+    )
     result = run_strategy_backtest(bars=bars, config=config)
-    storage.save_market_bars(symbol, asset_class, timeframe, bars, source="alpaca")
-    storage.save_feature_snapshots(symbol, asset_class, timeframe, result.feature_frame)
+    storage.save_market_bars(item.symbol, item.asset_class, item.timeframe, bars, source="alpaca")
+    storage.save_feature_snapshots(item.symbol, item.asset_class, item.timeframe, result.feature_frame)
     run_id = storage.save_backtest(
-        symbol=symbol,
-        asset_class=asset_class,
-        timeframe=timeframe,
-        bar_limit=limit,
+        symbol=item.symbol,
+        asset_class=item.asset_class,
+        timeframe=item.timeframe,
+        bar_limit=len(bars),
         config=config,
         result=result,
     )
-    for key, value in summarize_stats(result.stats).items():
-        print(f"{key}={value}")
-    print(f"strategy={config.strategy} commission={config.commission} spread={config.spread}")
-    print(f"backtest_run_id={run_id}")
-    return 0
+    return run_id, config, summarize_stats(result.stats)
+
+
+def _print_backtest_table(rows) -> None:
+    header = (
+        f"{'entry':<28} {'strategy':<10} {'trades':>6} {'win %':>6} {'P/L $':>10} "
+        f"{'avg trade %':>11} {'max DD %':>9} {'B&H %':>8} {'run':>5}"
+    )
+    print(header)
+    print("-" * len(header))
+    total_trades, total_pnl = 0, 0.0
+    for item, run_id, _config, summary in rows:
+        if run_id is None:
+            print(f"{item.label:<28} {item.strategy:<10} {'error (see log)':>6}")
+            continue
+        trades = int(summary.get("# Trades", 0) or 0)
+        pnl = float(summary.get("P/L [$]", 0.0))
+        total_trades += trades
+        total_pnl += pnl
+        print(
+            f"{item.label:<28} {item.strategy:<10} {trades:>6} "
+            f"{_fmt(summary.get('Win Rate [%]'), 1):>6} {pnl:>10.2f} "
+            f"{_fmt(summary.get('Avg. Trade [%]'), 2):>11} "
+            f"{_fmt(summary.get('Max. Drawdown [%]'), 2):>9} "
+            f"{_fmt(summary.get('Buy & Hold Return [%]'), 1):>8} {run_id:>5}"
+        )
+    print("-" * len(header))
+    print(f"{'total':<28} {'':<10} {total_trades:>6} {'':>6} {total_pnl:>10.2f}")
+
+
+def _fmt(value, decimals: int) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    return "n/a" if number != number else f"{number:.{decimals}f}"
 
 
 if __name__ == "__main__":
