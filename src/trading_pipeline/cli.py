@@ -80,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also send a notification when there is nothing to do.",
     )
     parser.add_argument(
+        "--max-open-positions",
+        type=int,
+        help="Skip BUY signals while this many positions are open across all symbols "
+        "(default: MAX_OPEN_POSITIONS; 0 = no limit). Exits are never blocked.",
+    )
+    parser.add_argument(
         "--telegram",
         action="store_true",
         help="Send alerts to Telegram (needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID).",
@@ -147,6 +153,14 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--position-size must be in (0, 1].")
         if limit <= 0 or notional <= 0:
             raise ValueError("--limit and --notional must be positive.")
+        max_open_positions = (
+            args.max_open_positions
+            if args.max_open_positions is not None
+            else settings.max_open_positions
+        )
+        if max_open_positions is not None and max_open_positions < 0:
+            raise ValueError("--max-open-positions must be >= 0.")
+        max_open_positions = max_open_positions or None
         start = _parse_date(args.start)
         end = _parse_date(args.end, inclusive_end=True)
         if (start or end) and not args.backtest:
@@ -192,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run_backtests(args, broker, storage, items, start, end)
 
     notifier = build_notifier(args.telegram, settings)
-    _log_mode(settings)
+    _log_mode(settings, max_open_positions)
     notify_hold = args.notify_hold or settings.notify_hold
 
     if args.watch or args.once:
@@ -205,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
             items=watch_items(use_watchlist=True),
             orders_enabled=settings.orders_enabled,
             notify_hold=notify_hold,
+            max_open_positions=max_open_positions,
         )
         if args.once:
             outcomes = watcher.run_cycle()
@@ -215,9 +230,11 @@ def main(argv: list[str] | None = None) -> int:
         watcher.run_forever(interval=interval)
         return 0
 
-    from trading_pipeline.pipeline import flush_outbox, run_once
+    from trading_pipeline.pipeline import flush_outbox, run_once, sync_order_fills
 
     flush_outbox(storage, notifier)
+    if settings.orders_enabled:
+        sync_order_fills(storage, broker)
     result = run_once(
         broker=broker,
         notifier=notifier,
@@ -230,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
         storage=storage,
         notify_hold=notify_hold,
         strategy=strategy,
+        max_open_positions=max_open_positions,
     )
     if result.status == "already_processed":
         print(f"bar {result.bar_timestamp.isoformat()} already processed; nothing to do")
@@ -252,7 +270,9 @@ def build_notifier(use_telegram: bool, settings: Settings) -> Notifier:
     return MultiNotifier([telegram], optional=[console])
 
 
-def _log_mode(settings: Settings) -> None:
+def _log_mode(settings: Settings, max_open_positions: int | None) -> None:
+    if max_open_positions:
+        logger.info("At most %d open positions: further BUY signals are skipped.", max_open_positions)
     if settings.orders_enabled:
         logger.warning("PAPER ORDERS ENABLED: decisions will place orders on the Alpaca paper account.")
     else:

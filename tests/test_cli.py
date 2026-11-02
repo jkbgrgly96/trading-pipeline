@@ -103,3 +103,8 @@ def test_backtest_start_fetches_a_date_range(env, capsys):
 def test_start_is_rejected_outside_backtests(env):
     with pytest.raises(SystemExit):
         cli.main(["--once", "--start", "2026-01-01"])
+
+
+def test_negative_max_open_positions_is_rejected(env):
+    with pytest.raises(SystemExit):
+        cli.main(["--once", "--max-open-positions", "-1"])

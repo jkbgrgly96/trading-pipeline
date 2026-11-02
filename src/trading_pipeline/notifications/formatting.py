@@ -57,10 +57,12 @@ def format_decision(
         ]
         position = decision.position
         if position is not None:
+            filled = position.entry_fill_price is not None
+            entry = position.entry_fill_price if filled else position.entry_price
             lines.append(
-                f"Entry: {_price(position.entry_price)} on "
+                f"Entry{' (paper fill)' if filled else ''}: {_price(entry)} on "
                 f"{_bar_time(position.entry_time, timeframe)}"
-                f"   P/L: {_pct(decision.price, position.entry_price)}"
+                f"   P/L: {_pct(decision.price, entry)}"
             )
         lines.append(f"Why: {decision.reason}")
     else:

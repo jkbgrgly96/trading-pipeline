@@ -67,6 +67,8 @@ class Settings:
     database_path: str = "data/trading_pipeline.sqlite3"
     watchlist_path: str = "watchlist.toml"
     notify_hold: bool = False
+    # Skip BUY signals while this many positions are open (None: no limit).
+    max_open_positions: int | None = None
 
     @property
     def orders_enabled(self) -> bool:
@@ -95,4 +97,5 @@ def load_settings() -> Settings:
         database_path=os.getenv("DATABASE_PATH", "data/trading_pipeline.sqlite3"),
         watchlist_path=os.getenv("WATCHLIST_PATH", "watchlist.toml"),
         notify_hold=_as_bool(os.getenv("NOTIFY_HOLD"), False),
+        max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS") or 0) or None,
     )

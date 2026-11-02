@@ -16,6 +16,8 @@ Guarantees the alerting use case relies on:
   failed send is retried on later cycles for up to ``OUTBOX_MAX_AGE``.
 * Orders are only ever sent to the Alpaca *paper* account, and only when
   ``orders_enabled`` (ALPACA_PAPER + TRADING_MODE=paper + PLACE_ORDERS).
+* With ``max_open_positions``, BUY signals are skipped while that many
+  positions (any symbol) are open; exits are never blocked.
 """
 
 from __future__ import annotations
@@ -50,6 +52,8 @@ logger = logging.getLogger(__name__)
 MAX_CATCH_UP_BARS = 50
 # Undelivered alerts are retried for this long, then reported as abandoned.
 OUTBOX_MAX_AGE = timedelta(hours=24)
+# Paper orders are checked for fills for this long after they were placed.
+FILL_SYNC_WINDOW = timedelta(days=7)
 PAPER_SOURCES = frozenset({"paper", "paper_adopted"})
 
 
@@ -83,6 +87,7 @@ class _Context:
     notional: float
     notify_hold: bool
     now: datetime
+    max_open_positions: int | None
 
 
 def run_once(
@@ -99,6 +104,7 @@ def run_once(
     notify_hold: bool = False,
     now: datetime | None = None,
     strategy: Strategy | None = None,
+    max_open_positions: int | None = None,
 ) -> PipelineResult:
     now = now or datetime.now(UTC)
     strategy = strategy or get_strategy(DEFAULT_STRATEGY)
@@ -131,7 +137,7 @@ def run_once(
 
     context = _Context(
         broker, notifier, storage, strategy, symbol, asset_class, timeframe,
-        orders_enabled, notional, notify_hold, now,
+        orders_enabled, notional, notify_hold, now, max_open_positions,
     )
     result: PipelineResult | None = None
     for index in pending:
@@ -180,7 +186,7 @@ def _process_bar(context: _Context, history: History, late: bool) -> PipelineRes
     latest = history.latest
     position = _current_position(context, latest)
     signal = context.strategy.signal(context.symbol, context.asset_class, history)
-    decision = decide(signal, position, latest)
+    decision = decide(signal, position, latest, entries_allowed=_entries_allowed(context, position))
     notify_required = decision.is_actionable or (context.notify_hold and not late)
 
     signal_id = storage.save_signal(
@@ -272,6 +278,52 @@ def flush_outbox(
             f"and were dropped: " + "; ".join(abandoned[:10]) + ". Check the dashboard.",
         )
     return sent
+
+
+def _entries_allowed(context: _Context, position: OpenPosition | None) -> bool:
+    if position is not None or not context.max_open_positions:
+        return True
+    return context.storage.count_open_positions() < context.max_open_positions
+
+
+def sync_order_fills(
+    storage: Storage,
+    broker: Broker,
+    now: datetime | None = None,
+    window: timedelta = FILL_SYNC_WINDOW,
+) -> int:
+    """Record the paper account's fill prices for recent entry/exit orders.
+
+    Entries are submitted at the alert bar's close but fill later (stocks: at
+    the next open), so the fill is looked up on later cycles. Returns how many
+    fills were recorded.
+    """
+    now = now or datetime.now(UTC)
+    recorded = 0
+    for row in storage.positions_awaiting_fills(since=now - window):
+        for side in ("entry", "exit"):
+            order_id = row[f"{side}_order_id"]
+            if not order_id or row[f"{side}_fill_price"] is not None:
+                continue
+            try:
+                order = broker.get_order(order_id)
+            except Exception:  # noqa: BLE001 - one bad lookup must not block the rest
+                logger.exception("Could not look up %s order %s", side, order_id)
+                continue
+            if not order.fill_is_final:
+                continue
+            assert order.filled_avg_price is not None
+            if side == "entry":
+                storage.record_entry_fill(row["id"], order.filled_avg_price, order.filled_qty, order.filled_at)
+            else:
+                storage.record_exit_fill(row["id"], order.filled_avg_price, order.filled_at)
+            logger.info(
+                "%s %s fill: %g @ %.4f (alert price %s)",
+                row["symbol"], side, order.filled_qty, order.filled_avg_price,
+                row[f"{side}_price"],
+            )
+            recorded += 1
+    return recorded
 
 
 def _current_position(context: _Context, latest: FeatureSnapshot) -> OpenPosition | None:

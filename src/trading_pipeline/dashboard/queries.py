@@ -156,7 +156,12 @@ def load_positions(
     asset_class: str | None = None,
     timeframe: str | None = None,
 ) -> pd.DataFrame:
-    """Positions joined with the latest stored close for unrealized P/L."""
+    """Positions joined with the latest stored close for unrealized P/L.
+
+    P/L uses the paper fill prices once they are known, else the alert prices
+    (the bar close each decision was made on). ``*_fill_vs_alert_pct`` show
+    the difference: positive on entry and negative on exit both cost money.
+    """
     clauses, params = _filter_clauses(
         symbol=symbol,
         asset_class=asset_class,
@@ -190,10 +195,16 @@ def load_positions(
     )
     if frame.empty:
         return frame
-    mark = frame["exit_price"].where(frame["status"] == "closed", frame["last_close"])
-    frame["mark_price"] = pd.to_numeric(mark, errors="coerce")
-    entry = pd.to_numeric(frame["entry_price"], errors="coerce")
+    entry_alert = _numeric(frame, "entry_price")
+    exit_alert = _numeric(frame, "exit_price")
+    entry_fill = _numeric(frame, "entry_fill_price")
+    exit_fill = _numeric(frame, "exit_fill_price")
+    entry = entry_fill.fillna(entry_alert)
+    closed = frame["status"] == "closed"
+    frame["mark_price"] = exit_fill.fillna(exit_alert).where(closed, _numeric(frame, "last_close"))
     frame["pnl_pct"] = (frame["mark_price"] / entry - 1) * 100
+    frame["entry_fill_vs_alert_pct"] = (entry_fill / entry_alert - 1) * 100
+    frame["exit_fill_vs_alert_pct"] = (exit_fill / exit_alert - 1) * 100
     frame["to_stop_pct"] = (pd.to_numeric(frame["stop_loss"], errors="coerce") / frame["mark_price"] - 1) * 100
     frame["to_target_pct"] = (
         pd.to_numeric(frame["take_profit"], errors="coerce") / frame["mark_price"] - 1
@@ -436,6 +447,13 @@ def _add_feature_columns(frame: pd.DataFrame) -> pd.DataFrame:
             lambda features, key=column: features.get(key) if isinstance(features, dict) else None
         )
     return frame
+
+
+def _numeric(frame: pd.DataFrame, column: str) -> pd.Series:
+    """Column as floats; all-NaN when it does not exist (database not migrated yet)."""
+    if column not in frame.columns:
+        return pd.Series(float("nan"), index=frame.index)
+    return pd.to_numeric(frame[column], errors="coerce")
 
 
 def _parse_datetime_columns(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:

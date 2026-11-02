@@ -78,6 +78,8 @@ class OpenPosition:
     source: str = "virtual"
     id: int | None = None
     entry_order_id: str | None = None
+    # Paper fill price of the entry order, once known (``entry_price`` is the alert's bar close).
+    entry_fill_price: float | None = None
 
 
 @dataclass(frozen=True)

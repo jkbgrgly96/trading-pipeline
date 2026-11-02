@@ -109,3 +109,14 @@ def test_entry_bar_range_does_not_trigger_stop_or_target():
     entered_now = OpenPosition("T", AssetClass.STOCK, "1Day", 100.0, TS, stop_loss=96.0, take_profit=108.0, id=1)
     decision = decide(signal(SignalAction.HOLD), entered_now, snap(close=100, low=90, high=120))
     assert decision.action == DecisionAction.NONE
+
+
+def test_buy_is_skipped_when_entries_are_not_allowed():
+    decision = decide(signal(SignalAction.BUY), None, snap(), entries_allowed=False)
+    assert decision.action == DecisionAction.NONE
+    assert decision.reason.startswith("buy_signal_skipped_max_open_positions")
+
+
+def test_exit_is_allowed_when_entries_are_not():
+    decision = decide(signal(SignalAction.SELL), position(), snap(), entries_allowed=False)
+    assert decision.action == DecisionAction.EXIT_LONG

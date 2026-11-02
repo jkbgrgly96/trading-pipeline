@@ -23,7 +23,7 @@ from trading_pipeline.features import FeatureSnapshot, snapshots_from_frame
 if TYPE_CHECKING:
     from trading_pipeline.backtest.runner import BacktestConfig, BacktestResult
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class Storage:
@@ -72,6 +72,8 @@ class Storage:
                     _migrate_to_v3(connection)
                 if version < 4:
                     _migrate_to_v4(connection)
+                if version < 5:
+                    _migrate_to_v5(connection)
                 if version < SCHEMA_VERSION:
                     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 connection.execute("COMMIT")
@@ -414,6 +416,54 @@ class Storage:
             )
             return int(cursor.lastrowid)
 
+    def count_open_positions(self) -> int:
+        with self.connect() as connection:
+            return int(
+                connection.execute("SELECT COUNT(*) FROM positions WHERE status = 'open'").fetchone()[0]
+            )
+
+    def positions_awaiting_fills(self, since: datetime) -> list[dict[str, Any]]:
+        """Positions with an entry or exit order whose fill is not recorded yet.
+
+        Only positions opened (entry) or last changed (exit) after ``since``,
+        so orders that never fill are not polled forever.
+        """
+        cutoff = iso_timestamp(since)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM positions
+                WHERE (entry_order_id IS NOT NULL AND entry_fill_price IS NULL AND created_at >= ?)
+                   OR (exit_order_id IS NOT NULL AND exit_fill_price IS NULL AND updated_at >= ?)
+                ORDER BY id
+                """,
+                (cutoff, cutoff),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_entry_fill(
+        self, position_id: int, price: float, quantity: float, filled_at: datetime | None
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE positions
+                SET entry_fill_price = ?, quantity = ?, entry_filled_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (price, quantity, _optional_timestamp(filled_at), _now(), position_id),
+            )
+
+    def record_exit_fill(self, position_id: int, price: float, filled_at: datetime | None) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE positions SET exit_fill_price = ?, exit_filled_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (price, _optional_timestamp(filled_at), _now(), position_id),
+            )
+
     def set_position_entry_order(self, position_id: int, order_id: str | None) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -653,6 +703,7 @@ def _row_to_position(row: sqlite3.Row) -> OpenPosition:
         take_profit=row["take_profit"],
         source=row["source"],
         entry_order_id=row["entry_order_id"],
+        entry_fill_price=row["entry_fill_price"],
     )
 
 
@@ -708,6 +759,13 @@ def _migrate_to_v4(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE backtest_runs ADD COLUMN sizing TEXT")
     connection.execute("ALTER TABLE backtest_runs ADD COLUMN notional REAL")
     connection.execute("UPDATE backtest_runs SET sizing = 'equity_fraction'")
+
+
+def _migrate_to_v5(connection: sqlite3.Connection) -> None:
+    """Paper fill prices and times, next to the alert prices (``entry_price`` /
+    ``exit_price`` stay the bar close the decision was made on)."""
+    for column in ("entry_fill_price REAL", "entry_filled_at TEXT", "exit_fill_price REAL", "exit_filled_at TEXT"):
+        connection.execute(f"ALTER TABLE positions ADD COLUMN {column}")
 
 
 def _execute_script(connection: sqlite3.Connection, script: str) -> None:
@@ -779,6 +837,10 @@ def _is_missing(value: Any) -> bool:
         return False
     # Array-likes return an array; only scalars can be "missing".
     return isinstance(result, bool | np.bool_) and bool(result)
+
+
+def _optional_timestamp(value: datetime | None) -> str | None:
+    return iso_timestamp(value) if value is not None else None
 
 
 def _now() -> str:

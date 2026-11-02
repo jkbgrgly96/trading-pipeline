@@ -63,6 +63,20 @@ Paper order: not placed (alerts only)
   entry when an exit comes first, and won't re-adopt a position whose exit
   order is still queued. Virtual positions from alerts-only mode keep getting
   exit alerts after you switch orders on.
+- **Fill prices:** with paper orders on, every cycle looks up the paper fills
+  of recent entry and exit orders and stores them next to the alert prices
+  (the bar close the decision used). The dashboard's P/L uses the fills once
+  known and shows how far each fill was from the alert price, which is the
+  slippage to compare against the backtest. Stop and target stay relative to
+  the alert price, as in the backtest.
+
+### Limiting open positions
+
+`MAX_OPEN_POSITIONS=5` (or `--max-open-positions 5`) skips BUY signals while
+5 positions are open across all symbols, virtual or paper; the skipped signal
+is stored with reason `buy_signal_skipped_max_open_positions` but not alerted.
+Exits are never blocked. Backtests run each symbol on its own, so they do not
+apply this limit.
 
 ## Safety model
 

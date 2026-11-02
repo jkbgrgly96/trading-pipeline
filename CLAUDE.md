@@ -30,15 +30,18 @@ Tests never hit the network. Use `tests/fakes.py` (`FakeBroker`,
 
 ## Flow (per symbol, per closed bar)
 
-`watch.Watcher.run_cycle` → `flush_outbox` → `pipeline.run_once` per watchlist item:
+`watch.Watcher.run_cycle` → `flush_outbox` → `sync_order_fills` (paper orders on) → `pipeline.run_once` per
+watchlist item:
 1. `broker.get_bars` → `timeframes.closed_bars` (drop the forming bar) → need ≥ `strategy.min_bars`.
 2. `_pending_indexes`: every closed bar after `storage.last_processed_bar` (first run: latest bar
    only; catch-up capped at `MAX_CATCH_UP_BARS`). Nothing pending → `already_processed`.
 3. Features (`strategy.feature_definitions()`) computed once over all closed bars; then for each pending
    bar, oldest first (`_process_bar`): `_current_position` (paper reconciliation) →
-   `strategy.signal(History)` → `decide` →
+   `strategy.signal(History)` → `decide` (`entries_allowed=False` once `max_open_positions` are open) →
    `save_signal` (unique per bar, stores the message = outbox) → `_apply_decision` → `deliver`.
 4. Undelivered alerts are retried by `flush_outbox` for `OUTBOX_MAX_AGE`, then reported as dropped.
+5. `sync_order_fills` records paper fill prices (`entry_fill_price`/`exit_fill_price`) of orders placed
+   within `FILL_SYNC_WINDOW`; `entry_price`/`exit_price` stay the alert's bar close.
 
 ## Layout (`src/trading_pipeline/`)
 
@@ -47,7 +50,7 @@ Tests never hit the network. Use `tests/fakes.py` (`FakeBroker`,
 | `domain.py` | Frozen dataclasses/enums: `Bar`, `Signal`, `Decision`, `OpenPosition`, `SignalAction`, `DecisionAction`, `ExitReason` |
 | `timeframes.py` | Parse `5Min`/`1Hour`/`1Day`, Alpaca mapping, lookback windows, `closed_bars` |
 | `config.py` | `Settings` from env + `.env` loader; `orders_enabled` safety gate |
-| `brokers/base.py`, `brokers/alpaca.py` | `Broker` ABC (latest bars, bars in a date range, position, buy, close, order status) and the paper-only Alpaca adapter (split-adjusted stock bars via `ALPACA_ADJUSTMENT`) |
+| `brokers/base.py`, `brokers/alpaca.py` | `Broker` ABC (latest bars, bars in a date range, position, buy, close, `get_order` → `BrokerOrder` with fills) and the paper-only Alpaca adapter (split-adjusted stock bars via `ALPACA_ADJUSTMENT`) |
 | `features/` | `IndicatorDefinition` list → `compute_feature_frame` (pandas-ta-classic) → `FeatureSnapshot`; `snapshots_from_frame` for bulk |
 | `strategies/` | `base.py`: `Strategy` ABC (`features`, `min_bars`, `signal`, `risk_levels`) and `History` (look-ahead-free view); `__init__.py`: `STRATEGIES` registry, `get_strategy`; `sma_rsi.py`: `SmaRsiStrategy` (default) |
 | `decisions.py` | `decide()`: the single source of truth for entries/exits (live + backtest) |
@@ -100,8 +103,10 @@ Tests never hit the network. Use `tests/fakes.py` (`FakeBroker`,
 - Stop/target are checked on bar close (alert semantics), not as resting broker orders. They are
   never checked against the bar a position was opened or adopted on.
 - Signals stored before schema v2 have no virtual positions, so their exits are not tracked.
-- Backtests run each symbol on its own (own cash); nothing portfolio-level is simulated. Backtest
-  fills use the bar's prices, so slippage beyond `--spread` is not modelled.
+- Backtests run each symbol on its own (own cash); nothing portfolio-level is simulated, including
+  `MAX_OPEN_POSITIONS`. Backtest fills use the bar's prices, so slippage beyond `--spread` is not
+  modelled; compare with the paper fill-vs-alert columns.
+- Stop/target are set from the alert price, not the paper fill (same as the backtest).
 - Stock bars are split-adjusted, but a position held through a split keeps its pre-split entry,
   stop and target, so the first post-split bar looks like a stop-loss. Close such positions by hand.
 - One strategy per symbol/asset class/timeframe (signals and positions are keyed by those).

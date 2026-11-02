@@ -14,7 +14,7 @@ from trading_pipeline.brokers.base import Broker
 from trading_pipeline.domain import AssetClass
 from trading_pipeline.notifications.base import Notifier
 from trading_pipeline.notifications.formatting import format_error
-from trading_pipeline.pipeline import InsufficientBarsError, flush_outbox, run_once
+from trading_pipeline.pipeline import InsufficientBarsError, flush_outbox, run_once, sync_order_fills
 from trading_pipeline.storage import Storage
 from trading_pipeline.strategies import DEFAULT_STRATEGY, Strategy, get_strategy
 from trading_pipeline.timeframes import parse_timeframe
@@ -124,8 +124,12 @@ class Watcher:
         notify_hold: bool = False,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         sleep: Callable[[float], None] = time.sleep,
+        max_open_positions: int | None = None,
     ) -> None:
         validate_watchlist(items, orders_enabled)
+        if max_open_positions is not None and max_open_positions < 0:
+            raise ValueError("max_open_positions must be >= 0 (0 or None: no limit).")
+        self.max_open_positions = max_open_positions or None
         self._strategies: dict[WatchItem, Strategy] = {
             item: get_strategy(item.strategy) for item in items
         }
@@ -146,6 +150,11 @@ class Watcher:
             flush_outbox(self.storage, self.notifier, now=self._clock())
         except Exception:  # noqa: BLE001 - never let the outbox stop alerting
             logger.exception("Outbox flush failed")
+        if self.orders_enabled:
+            try:
+                sync_order_fills(self.storage, self.broker, now=self._clock())
+            except Exception:  # noqa: BLE001 - fills are bookkeeping, never block alerts
+                logger.exception("Fill sync failed")
         for item in self.items:
             outcomes[item.label] = self._run_item(item)
         return outcomes
@@ -153,6 +162,8 @@ class Watcher:
     def run_forever(self, interval: timedelta | None = None, max_cycles: int | None = None) -> None:
         interval = interval or default_interval(self.items)
         mode = "PAPER ORDERS ON" if self.orders_enabled else "alerts only"
+        if self.max_open_positions:
+            mode += f", max {self.max_open_positions} open positions"
         symbols = ", ".join(f"{item.label} [{item.strategy}]" for item in self.items)
         self._safe_notify(
             f"▶️ Watcher started ({mode}), every {interval}.\nWatching: {symbols}"
@@ -191,6 +202,7 @@ class Watcher:
                 notify_hold=self.notify_hold,
                 now=self._clock(),
                 strategy=self._strategies[item],
+                max_open_positions=self.max_open_positions,
             )
         except InsufficientBarsError as exc:
             logger.warning("%s", exc)
