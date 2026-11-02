@@ -23,7 +23,7 @@ from trading_pipeline.features import FeatureSnapshot, snapshots_from_frame
 if TYPE_CHECKING:
     from trading_pipeline.backtest.runner import BacktestConfig, BacktestResult
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class Storage:
@@ -78,6 +78,8 @@ class Storage:
                     _migrate_to_v6(connection)
                 if version < 7:
                     _migrate_to_v7(connection)
+                if version < 8:
+                    _migrate_to_v8(connection)
                 if version < SCHEMA_VERSION:
                     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 connection.execute("COMMIT")
@@ -564,6 +566,8 @@ class Storage:
         bar_limit: int,
         config: BacktestConfig,
         result: BacktestResult,
+        label: str | None = None,
+        sweep_id: int | None = None,
     ) -> int:
         summary = _backtest_summary(result.stats)
         with self.connect() as connection:
@@ -574,9 +578,9 @@ class Storage:
                     commission, spread, position_size, start, end, return_pct,
                     buy_hold_return_pct, max_drawdown_pct, sharpe_ratio,
                     trade_count, win_rate_pct, stats_json, strategy, sizing, notional,
-                    strategy_params, risk_per_trade, max_notional
+                    strategy_params, risk_per_trade, max_notional, label, sweep_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _now(),
@@ -606,12 +610,59 @@ class Storage:
                     _json(result.strategy_params),
                     config.risk_per_trade if config.sizing == "risk" else None,
                     config.max_notional if config.sizing == "risk" else None,
+                    label,
+                    sweep_id,
                 ),
             )
             run_id = int(cursor.lastrowid)
             self._save_backtest_trades(connection, run_id, symbol, result.trades)
             self._save_backtest_equity_curve(connection, run_id, result.equity_curve)
             return run_id
+
+    # --- parameter sweeps -----------------------------------------------
+
+    def save_sweep(
+        self,
+        strategy: str,
+        grid: Mapping[str, Any],
+        base_params: Mapping[str, Any],
+        periods: list[Mapping[str, Any]],
+        rank_by: str,
+        min_trades: int,
+        entries: list[str],
+    ) -> int:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO sweeps (
+                    created_at, strategy, grid_json, base_params_json, periods_json,
+                    rank_by, min_trades, entries_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (_now(), strategy, _json(grid), _json(base_params), _json(periods), rank_by,
+                 min_trades, _json(entries)),
+            )
+            return int(cursor.lastrowid)
+
+    def save_sweep_results(self, sweep_id: int, rows: list[Mapping[str, Any]]) -> None:
+        """One row per configuration x period x watchlist entry."""
+        columns = [
+            "config", "rank", "label", "strategy", "params_json", "period", "period_start",
+            "period_end", "role", "symbol", "timeframe", "trades", "wins", "pnl", "gross_profit",
+            "gross_loss", "return_pct_sum", "buy_hold_pct", "max_drawdown_pct", "exposure_pct", "error",
+        ]
+        values = [
+            (sweep_id, *[_to_storage_value(row.get(column)) for column in columns]) for row in rows
+        ]
+        with self.connect() as connection:
+            connection.executemany(
+                f"""
+                INSERT INTO sweep_results (sweep_id, {", ".join(columns)})
+                VALUES ({", ".join("?" * (len(columns) + 1))})
+                """,
+                values,
+            )
 
     def _save_backtest_trades(
         self,
@@ -804,6 +855,13 @@ def _migrate_to_v7(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE positions ADD COLUMN notional REAL")
     connection.execute("ALTER TABLE backtest_runs ADD COLUMN risk_per_trade REAL")
     connection.execute("ALTER TABLE backtest_runs ADD COLUMN max_notional REAL")
+
+
+def _migrate_to_v8(connection: sqlite3.Connection) -> None:
+    """Parameter sweeps (for the dashboard), and backtests tagged with their sweep."""
+    _execute_script(connection, SWEEPS)
+    connection.execute("ALTER TABLE backtest_runs ADD COLUMN label TEXT")
+    connection.execute("ALTER TABLE backtest_runs ADD COLUMN sweep_id INTEGER")
 
 
 def _execute_script(connection: sqlite3.Connection, script: str) -> None:
@@ -1072,4 +1130,47 @@ CREATE TABLE IF NOT EXISTS symbol_status (
     last_error_at TEXT,
     PRIMARY KEY (symbol, asset_class, timeframe)
 );
+"""
+
+SWEEPS = """
+CREATE TABLE IF NOT EXISTS sweeps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    grid_json TEXT NOT NULL,
+    base_params_json TEXT NOT NULL,
+    periods_json TEXT NOT NULL,
+    rank_by TEXT NOT NULL,
+    min_trades INTEGER NOT NULL,
+    entries_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sweep_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sweep_id INTEGER NOT NULL,
+    config INTEGER NOT NULL,
+    rank INTEGER,
+    label TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    period TEXT NOT NULL,
+    period_start TEXT NOT NULL,
+    period_end TEXT,
+    role TEXT NOT NULL CHECK (role IN ('tune', 'check')),
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    trades INTEGER NOT NULL,
+    wins INTEGER NOT NULL,
+    pnl REAL NOT NULL,
+    gross_profit REAL NOT NULL,
+    gross_loss REAL NOT NULL,
+    return_pct_sum REAL NOT NULL,
+    buy_hold_pct REAL,
+    max_drawdown_pct REAL,
+    exposure_pct REAL,
+    error TEXT,
+    FOREIGN KEY(sweep_id) REFERENCES sweeps(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_sweep_results_lookup ON sweep_results(sweep_id, config, period);
 """

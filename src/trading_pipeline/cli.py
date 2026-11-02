@@ -129,14 +129,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Values to try for a strategy parameter, repeatable (default: a built-in grid).",
     )
     sweep.add_argument(
-        "--split", help="First out-of-sample date (default: 2024-01-01); tuning uses --start..--split."
+        "--period",
+        action="append",
+        metavar="START:END",
+        help="A sweep period, repeatable, e.g. 2018-01-01:2020-12-31 (END inclusive, may be empty "
+        "for 'until now'). The last --check-periods of them are check periods; the rest tune. "
+        "Without --period: --start..--split tunes, --split..--end checks.",
     )
-    sweep.add_argument("--top", type=int, default=5, help="Configurations re-run out of sample.")
+    sweep.add_argument("--check-periods", type=int, default=1, help="How many of the last --period are checks.")
+    sweep.add_argument(
+        "--split", help="First check date when no --period is given (default: 2024-01-01)."
+    )
+    sweep.add_argument(
+        "--rank-by",
+        choices=["profit_factor", "pnl", "expectancy"],
+        default="profit_factor",
+        help="Ranking over the tune periods; configurations profitable in every tune period come "
+        "first (default: profit_factor).",
+    )
+    sweep.add_argument("--top", type=int, default=5, help="Best configurations also run on the check periods.")
     sweep.add_argument(
         "--min-trades",
         type=int,
         default=30,
-        help="Fewer in-sample trades (all entries together) cannot be a finalist.",
+        help="Fewer trades over the tune periods (all entries together) cannot be a finalist.",
+    )
+    sweep.add_argument(
+        "--detail-top",
+        type=int,
+        default=1,
+        help="Store full backtests (trades, equity, chart) of this many finalists and of the defaults, "
+        "per entry and period, for the dashboard (default: 1).",
     )
 
     backtest = parser.add_argument_group("backtest options")
@@ -285,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(exc))
         if args.sweep:
             try:
-                return _run_sweep(args, broker, items, cli_params, start, end)
+                return _run_sweep(args, broker, storage, items, cli_params, start, end)
             except ValueError as exc:
                 parser.error(str(exc))
         return _run_backtests(args, broker, storage, items, start, end)
@@ -502,46 +525,67 @@ def _print_backtest_table(rows) -> None:
     print(f"{'total':<28} {'':<10} {total_trades:>6} {'':>6} {total_pnl:>10.2f}")
 
 
-def _run_sweep(args, broker, items: list[WatchItem], base_params: dict, start, end) -> int:
-    import csv
-    import json
+def _sweep_periods(args, start, end) -> list:
+    from trading_pipeline.backtest.sweep import CHECK, TUNE, Period
 
-    from trading_pipeline.backtest.runner import fetch_backtest_bars
+    if args.period:
+        bounds = []
+        for text in args.period:
+            first, sep, last = text.partition(":")
+            if not sep:
+                raise ValueError(f"--period must look like START:END, got {text!r}.")
+            bounds.append((_parse_date(first), _parse_date(last, inclusive_end=True) if last.strip() else None))
+        if not 0 <= args.check_periods < len(bounds):
+            raise ValueError("--check-periods must leave at least one tune period.")
+        roles = [TUNE] * (len(bounds) - args.check_periods) + [CHECK] * args.check_periods
+        periods = [Period.of(first, last, role) for (first, last), role in zip(bounds, roles, strict=True)]
+    else:
+        split = _parse_date(args.split) or datetime(2024, 1, 1, tzinfo=UTC)
+        first = start or split - timedelta(days=3 * 365)
+        periods = [Period.of(first, split, TUNE), Period.of(split, end, CHECK)]
+    for period in periods:
+        if period.end is not None and period.start >= period.end:
+            raise ValueError(f"Period {period.name}: start must be before end.")
+    if len({p.name for p in periods}) != len(periods):
+        raise ValueError("Sweep periods must have distinct years.")
+    return periods
+
+
+def _run_sweep(args, broker, storage, items: list[WatchItem], base_params: dict, start, end) -> int:
+    from trading_pipeline.backtest.runner import fetch_backtest_bars, run_strategy_backtest
     from trading_pipeline.backtest.sweep import (
         SweepTarget,
+        backtest_config,
         parse_grid,
+        period_bars,
+        result_rows,
         run_sweep,
         valid_combinations,
     )
 
     strategy = args.strategy
     grid = parse_grid(strategy, args.grid)
-    split = _parse_date(args.split) or datetime(2024, 1, 1, tzinfo=UTC)
-    start = start or split - timedelta(days=3 * 365)
-    if start >= split or (end is not None and split >= end):
-        raise ValueError("--sweep needs --start < --split < --end.")
-
+    periods = _sweep_periods(args, start, end)
     candidates = valid_combinations(strategy, base_params, grid) or [base_params]
     built = [get_strategy(strategy, params) for params in candidates]
     min_bars = max([s.min_bars for s in built] + [get_strategy("sma_rsi").min_bars])
+    first_start = min(p.start for p in periods)
+    last_end = None if any(p.end is None for p in periods) else max(p.end for p in periods)
     print(
-        f"Sweeping {strategy}: {len(candidates)} combinations x {len(items)} entries, "
-        f"in-sample {start:%Y-%m-%d}..{split:%Y-%m-%d}, out-of-sample {split:%Y-%m-%d}.."
-        f"{(end or datetime.now(UTC)):%Y-%m-%d}"
+        f"Sweeping {strategy}: {len(candidates)} combinations x {len(items)} entries; "
+        + ", ".join(f"{p.name} ({p.role})" for p in periods)
     )
 
     def fetch(symbol, item):
         return fetch_backtest_bars(
             broker, symbol, item.asset_class, item.timeframe, min_bars=min_bars,
-            limit=item.limit, start=start, end=end,
+            limit=item.limit, start=first_start, end=last_end,
         )
 
     benchmark_cache: dict = {}
     targets = []
     for item in items:
-        benchmark = next(
-            (b for s in built if (b := s.benchmark_for(item.symbol, item.asset_class))), None
-        )
+        benchmark = next((b for s in built if (b := s.benchmark_for(item.symbol, item.asset_class))), None)
         benchmark_bars = None
         if benchmark:
             key = (benchmark, item.asset_class, item.timeframe)
@@ -561,35 +605,49 @@ def _run_sweep(args, broker, items: list[WatchItem], base_params: dict, start, e
             )
         )
 
-    ranked, out_rows = run_sweep(
-        targets, strategy, grid, start, split, end, base_params=base_params, cash=args.cash,
-        top=args.top, min_trades=args.min_trades, progress=logger.info,
+    outcome = run_sweep(
+        targets, strategy, grid, periods, base_params=base_params, cash=args.cash, top=args.top,
+        min_trades=args.min_trades, rank_by=args.rank_by, progress=logger.info,
     )
-    grid_keys = list(grid)
-    print(f"\nIn-sample ranking (by total P/L across entries, top 10 of {len(ranked)}):")
-    _print_sweep_rows(ranked[:10], grid_keys, out_of_sample=False)
-    print(f"\nOut-of-sample {split:%Y-%m-%d} onwards (not used for choosing):")
-    _print_sweep_rows(out_rows, grid_keys, out_of_sample=True)
+    sweep_id = storage.save_sweep(
+        strategy, grid, base_params, [p.as_dict() for p in periods], args.rank_by, args.min_trades,
+        [item.label for item in items],
+    )
+    storage.save_sweep_results(sweep_id, result_rows(outcome))
 
-    path = Path("data/sweeps") / f"{datetime.now(UTC):%Y%m%dT%H%M%S}_{strategy}.csv"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["phase", "label", "strategy", "params", "trades", "win_rate_pct", "pnl_usd",
-                         "avg_trade_pct", "profit_factor", "avg_buy_hold_pct", "errors"])
-        phases = [("in_sample", row, row.in_sample) for row in ranked]
-        phases += [("out_of_sample", row, row.out_of_sample) for row in out_rows]
-        for phase, row, summary in phases:
-            writer.writerow([
-                phase, row.label, row.strategy, json.dumps(row.params, sort_keys=True), summary.trades,
-                summary.win_rate, round(summary.pnl, 2), summary.avg_trade_pct, summary.profit_factor,
-                summary.avg_buy_hold_pct, "; ".join(summary.errors),
-            ])
-    print(f"\nAll results: {path}")
+    detailed = [*outcome.finalists[: max(args.detail_top, 0)], outcome.defaults]
+    for config in detailed:
+        for period in periods:
+            for target in targets:
+                bars = period_bars(target, period, get_strategy(config.strategy, config.params).min_bars)
+                if not any(bar.timestamp >= period.start for bar in bars):
+                    continue
+                backtest = backtest_config(target, config.strategy, config.params, period, args.cash)
+                try:
+                    result = run_strategy_backtest(bars, backtest, target.benchmark_bars)
+                except ValueError:
+                    continue
+                storage.save_market_bars(target.symbol, target.asset_class, target.timeframe, bars)
+                storage.save_feature_snapshots(target.symbol, target.asset_class, target.timeframe, result.feature_frame)
+                storage.save_backtest(
+                    target.symbol, target.asset_class, target.timeframe, len(bars), backtest, result,
+                    label=f"sweep {sweep_id} {config.label} {period.name}", sweep_id=sweep_id,
+                )
+
+    grid_keys = list(grid)
+    tune, check = outcome.tune_periods, outcome.check_periods
+    print(f"\nTune periods {', '.join(p.name for p in tune)}: ranked by {args.rank_by}, "
+          f"profitable in every tune period first (top 10 of {len(outcome.ranked)}):")
+    _print_sweep_rows(outcome.ranked[:10], grid_keys, tune, tune)
+    print("\nAll periods for the finalists, the defaults and sma_rsi "
+          f"(check periods {', '.join(p.name for p in check) or 'none'} were not used for choosing):")
+    _print_sweep_rows(outcome.reviewed, grid_keys, periods, check or tune)
+    print(f"\nSaved as sweep {sweep_id}: open the dashboard's Sweeps tab; full backtests of "
+          f"{', '.join(c.label for c in detailed)} are in the Backtests tab (label 'sweep {sweep_id} ...').")
     return 0
 
 
-def _print_sweep_rows(rows, grid_keys: list[str], out_of_sample: bool) -> None:
+def _print_sweep_rows(rows, grid_keys: list[str], periods, totals_over) -> None:
     def params_text(row) -> str:
         if row.label == "sma_rsi baseline":
             return "sma_rsi, default parameters"
@@ -597,24 +655,26 @@ def _print_sweep_rows(rows, grid_keys: list[str], out_of_sample: bool) -> None:
             return "default parameters"
         return " ".join(f"{key}={row.params[key]}" for key in grid_keys if key in row.params)
 
-    width = min(110, max([len("params")] + [len(params_text(row)) for row in rows]))
-    header = f"{'':<18} {'params':<{width}} {'trades':>6} {'win %':>6} {'P/L $':>9} {'avg %':>6} {'PF':>5}"
-    if out_of_sample:
-        header += f" {'in P/L $':>9} {'B&H %':>7}"
+    width = min(100, max([len("params")] + [len(params_text(row)) for row in rows]))
+    over = "+".join(p.name for p in totals_over)
+    header = (
+        f"{'':<17} {'params':<{width}} "
+        + "".join(f"{p.name + ' $':>12}" for p in periods)
+        + f" | {over + ' trades':>{len(over) + 7}} {'win %':>6} {'$/trade':>8} {'PF':>5}"
+    )
     print(header)
     print("-" * len(header))
     for row in rows:
-        summary = row.out_of_sample if out_of_sample else row.in_sample
+        total = row.total(totals_over)
+        consistent = "*" if row.consistent(totals_over) else " "
         line = (
-            f"{row.label:<18} {params_text(row)[:width]:<{width}} {summary.trades:>6} "
-            f"{_fmt(summary.win_rate, 1):>6} {summary.pnl:>9.2f} {_fmt(summary.avg_trade_pct, 2):>6} "
-            f"{_fmt(summary.profit_factor, 2):>5}"
+            f"{row.label:<16}{consistent} {params_text(row)[:width]:<{width}} "
+            + "".join(f"{row.period_total(p.name).pnl:>12.2f}" for p in periods)
+            + f" | {total.trades:>{len(over) + 7}} {_fmt(total.win_rate, 1):>6} "
+            f"{_fmt(total.expectancy, 2):>8} {_fmt(total.profit_factor, 2):>5}"
         )
-        if out_of_sample:
-            line += f" {row.in_sample.pnl:>9.2f} {_fmt(summary.avg_buy_hold_pct, 1):>7}"
         print(line)
-        for error in summary.errors[:3]:
-            print(f"{'':<18} ! {error}")
+    print("(* = made money in every one of those periods)")
 
 
 def _fmt(value, decimals: int) -> str:

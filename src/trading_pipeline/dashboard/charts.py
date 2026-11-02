@@ -476,3 +476,81 @@ def _add_position_levels(
             row=row,
             col=1,
         )
+
+
+# Diverging P/L scale: loss (red) <- neutral gray -> profit (blue).
+LOSS_COLOR = "#e34948"
+NEUTRAL_COLOR = "#f0efec"
+PROFIT_COLOR = "#2a78d6"
+
+
+def build_pnl_heatmap(
+    frame: pd.DataFrame,
+    row_column: str,
+    rows: list[str],
+    periods: list[str],
+    check_periods: set[str] | None = None,
+) -> go.Figure:
+    """P/L per row (configuration or symbol) and period, on a diverging scale.
+
+    ``frame`` has one row per (``row_column``, period) with pnl, trades,
+    win_rate_pct and profit_factor. Cells without data stay empty.
+    """
+    check_periods = check_periods or set()
+    columns = [f"{p} (check)" if p in check_periods else p for p in periods]
+    figure = go.Figure()
+    if frame.empty or not rows:
+        figure.update_layout(template="plotly_white", height=200)
+        return figure
+
+    lookup = frame.set_index([row_column, "period"])
+    z, text, hover = [], [], []
+    for row in rows:
+        z_row, text_row, hover_row = [], [], []
+        for period in periods:
+            if (row, period) in lookup.index and lookup.loc[(row, period), "trades"] > 0:
+                cell = lookup.loc[(row, period)]
+                pf = cell["profit_factor"]
+                pf_text = "inf" if pf == float("inf") else f"{pf:.2f}"
+                z_row.append(float(cell["pnl"]))
+                text_row.append(f"${cell['pnl']:,.0f}")
+                hover_row.append(
+                    f"{row} · {period}<br>P/L ${cell['pnl']:,.2f} · {int(cell['trades'])} trades"
+                    f"<br>win {cell['win_rate_pct']:.0f}% · PF {pf_text}"
+                )
+            else:
+                z_row.append(None)
+                text_row.append("no trades")
+                hover_row.append(f"{row} · {period}<br>no trades or no data")
+        z.append(z_row)
+        text.append(text_row)
+        hover.append(hover_row)
+
+    limit = max((abs(value) for row in z for value in row if value is not None), default=1.0) or 1.0
+    figure.add_trace(
+        go.Heatmap(
+            z=z,
+            x=columns,
+            y=rows,
+            text=text,
+            texttemplate="%{text}",
+            textfont={"color": "#0b0b0b", "size": 12},
+            customdata=hover,
+            hovertemplate="%{customdata}<extra></extra>",
+            colorscale=[[0.0, LOSS_COLOR], [0.5, NEUTRAL_COLOR], [1.0, PROFIT_COLOR]],
+            zmin=-limit,
+            zmax=limit,
+            zmid=0,
+            xgap=2,
+            ygap=2,
+            colorbar={"title": {"text": "P/L $"}, "thickness": 12},
+        )
+    )
+    figure.update_layout(
+        template="plotly_white",
+        height=max(220, 34 * len(rows) + 90),
+        margin={"l": 10, "r": 10, "t": 30, "b": 10},
+        xaxis={"side": "top", "showgrid": False},
+        yaxis={"autorange": "reversed", "showgrid": False},
+    )
+    return figure

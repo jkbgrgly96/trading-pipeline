@@ -196,23 +196,35 @@ uv run trading-pipeline --backtest --symbol "BTC/USD" --asset-class crypto --tim
 - The stats' `Start` is the bar before the first tradable one (Backtesting.py
   needs one bar of context).
 
-Parameter search (tune on one period, check on a later one):
+Parameter search (tune on some periods, check on later ones):
 
 ```powershell
-uv run trading-pipeline --sweep --strategy indicathor --watchlist watchlist.example.toml --start 2021-01-01 --split 2024-01-01
-uv run trading-pipeline --sweep --strategy donchian_breakout --grid entry_length=20,55,100 --grid exit_length=10,20
+uv run trading-pipeline --sweep --strategy donchian_breakout --watchlist watchlist.example.toml `
+  --period 2015-01-01:2017-12-31 --period 2018-01-01:2020-12-31 --period 2021-01-01:2023-12-31 `
+  --period 2024-01-01: --min-trades 150
+uv run trading-pipeline --sweep --strategy indicathor --start 2021-01-01 --split 2024-01-01 --grid entry_score=1,2
 ```
 
-Every `--grid` combination (default: a small built-in grid per strategy) is
-backtested on every watchlist entry from `--start` to `--split` and ranked by
-total P/L across entries (with risk sizing, dollars are comparable). Only the
-best `--top` configurations (at least `--min-trades` trades), the strategy's
-defaults and the `sma_rsi` baseline are then run from `--split` to `--end`,
-data that played no part in choosing them. A configuration that only shines
-in-sample is overfitted. The tables are printed and every row is saved to
-`data/sweeps/<time>_<strategy>.csv`; sweeps are not stored in the database.
-Ranking by total P/L favours strategies that trade often, so also compare the
-profit factor and the P/L per trade.
+Every `--grid` combination (default: a built-in grid per strategy) is
+backtested on every watchlist entry in every *tune* period. All `--period`s but
+the last `--check-periods` (default 1) are tune periods; without `--period`,
+`--start`..`--split` tunes and `--split`..`--end` checks. Configurations are
+ranked over the tune periods by `--rank-by` (`profit_factor` by default, or
+`pnl`, `expectancy`), those that made money in every tune period first, and
+need `--min-trades` trades to be finalists. The best `--top` finalists, the
+strategy's defaults and the `sma_rsi` baseline then also run on the check
+periods, which played no part in choosing them: a configuration that only
+shines in the tune periods is overfitted.
+
+Results are stored per configuration, period and entry, and shown in the
+dashboard's **Sweeps** tab (P/L heatmaps per period and per symbol, and every
+configuration in a table). Full backtests of the best `--detail-top` finalists
+and of the defaults (trades, equity, chart) are stored per entry and period and
+appear in the **Backtests** tab, labelled `sweep <id> <rank> <period>`.
+
+Alpaca's free data starts in January 2016 for stocks and January 2021 for
+crypto, so earlier periods are partial or empty (a period without data is
+skipped for that entry).
 
 ## Dashboard
 

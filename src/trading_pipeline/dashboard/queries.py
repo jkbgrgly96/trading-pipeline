@@ -472,3 +472,77 @@ def _join_patterns(value: Any) -> str:
     if isinstance(value, list):
         return ", ".join(str(item) for item in value)
     return str(value)
+
+
+# --- parameter sweeps -------------------------------------------------------------
+
+SWEEP_SUMS = ["trades", "wins", "pnl", "gross_profit", "gross_loss", "return_pct_sum"]
+
+
+def load_sweeps(database_path: str | Path) -> pd.DataFrame:
+    """Sweep runs, newest first (empty if the database predates sweeps)."""
+    if not _table_exists(database_path, "sweeps"):
+        return pd.DataFrame()
+    return _parse_datetime_columns(
+        _read_sql(database_path, "SELECT * FROM sweeps ORDER BY id DESC"), ["created_at"]
+    )
+
+
+def load_sweep_results(database_path: str | Path, sweep_id: int) -> pd.DataFrame:
+    """One row per configuration x period x watchlist entry."""
+    return _read_sql(
+        database_path,
+        "SELECT * FROM sweep_results WHERE sweep_id = ? ORDER BY config, period, symbol",
+        [sweep_id],
+    )
+
+
+def summarize_sweep(results: pd.DataFrame, by: list[str]) -> pd.DataFrame:
+    """Add up per-entry rows and derive win rate, profit factor and P/L per trade."""
+    if results.empty:
+        return pd.DataFrame(columns=[*by, *SWEEP_SUMS])
+    frame = results.groupby(by, sort=False)[SWEEP_SUMS].sum().reset_index()
+    trades = frame["trades"].where(frame["trades"] > 0)
+    frame["win_rate_pct"] = frame["wins"] / trades * 100
+    frame["pnl_per_trade"] = frame["pnl"] / trades
+    frame["avg_trade_pct"] = frame["return_pct_sum"] / trades
+    loss = frame["gross_loss"].where(frame["gross_loss"] > 0)
+    frame["profit_factor"] = (frame["gross_profit"] / loss).where(
+        loss.notna(), float("inf")
+    ).where(frame["trades"] > 0)
+    return frame
+
+
+def sweep_config_table(results: pd.DataFrame, periods: list[str]) -> pd.DataFrame:
+    """One row per configuration: P/L per period and totals over tune / check periods."""
+    if results.empty:
+        return pd.DataFrame()
+    meta = results.groupby("config", sort=False).agg(
+        rank=("rank", "first"), label=("label", "first"), strategy=("strategy", "first"),
+        params_json=("params_json", "first"),
+    )
+    per_period = summarize_sweep(results, ["config", "period"])
+    pnl = per_period.pivot(index="config", columns="period", values="pnl")
+    table = meta.join(pnl[[p for p in periods if p in pnl.columns]].add_prefix("pnl "))
+    for role in ("tune", "check"):
+        totals = summarize_sweep(results[results["role"] == role], ["config"]).set_index("config")
+        for column in ["trades", "win_rate_pct", "profit_factor", "pnl", "pnl_per_trade"]:
+            if column in totals.columns:
+                table[f"{role} {column}"] = totals[column]
+    tune_periods = per_period[per_period["period"].isin(results.loc[results["role"] == "tune", "period"])]
+    traded = tune_periods[tune_periods["trades"] > 0]
+    table["consistent"] = traded.groupby("config")["pnl"].apply(lambda pnl: bool((pnl > 0).all()))
+    table["consistent"] = table["consistent"].fillna(False).astype(bool)
+    table["reviewed"] = results.groupby("config")["period"].nunique().reindex(table.index) == len(
+        [p for p in periods if p in pnl.columns]
+    )
+    order = table["rank"].fillna(1e9) + table.index.map(lambda c: 2e9 if c == -1 else (1e9 if c == 0 else 0))
+    return table.assign(_order=order).sort_values("_order").drop(columns="_order").reset_index()
+
+
+def _table_exists(database_path: str | Path, table: str) -> bool:
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()
+    return row is not None

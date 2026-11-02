@@ -12,6 +12,7 @@ from trading_pipeline.dashboard.charts import (
     build_drawdown_chart,
     build_equity_curve_chart,
     build_market_chart,
+    build_pnl_heatmap,
     build_trade_overlay_chart,
     build_trade_pnl_chart,
 )
@@ -49,7 +50,10 @@ def render() -> None:
 
     symbols = queries.load_symbols(db_path)
     if symbols.empty:
-        st.info("No stored market data, signals, positions, or backtests yet.")
+        if queries.load_sweeps(db_path).empty:
+            st.info("No stored market data, signals, positions, or backtests yet.")
+            st.stop()
+        _render_sweeps(st, db_path)  # sweeps are all there is so far
         st.stop()
 
     selected = _sidebar_filters(st, symbols)
@@ -58,7 +62,7 @@ def render() -> None:
 
     @st.fragment(run_every=refresh_seconds if auto_refresh else None)
     def live_view() -> None:
-        tabs = st.tabs(["Overview", "Decisions", "Positions", "Chart", "Signals", "Backtests"])
+        tabs = st.tabs(["Overview", "Decisions", "Positions", "Chart", "Signals", "Backtests", "Sweeps"])
         with tabs[0]:
             _render_overview(st, db_path)
         with tabs[1]:
@@ -71,6 +75,8 @@ def render() -> None:
             _render_signals(st, db_path, selected, start_iso, end_iso)
         with tabs[5]:
             _render_backtests(st, db_path, selected, start_iso, end_iso)
+        with tabs[6]:
+            _render_sweeps(st, db_path)
 
     live_view()
 
@@ -433,6 +439,7 @@ def _render_backtests(st, database_path: Path, selected: dict, start: str | None
     display_columns = [
         "id",
         "created_at",
+        "label",
         "symbol",
         "timeframe",
         "strategy",
@@ -514,6 +521,124 @@ _FEATURE_KEYS = [
     "bbands_20_2_lower",
     "bbands_20_2_upper",
 ]
+
+
+def _render_sweeps(st, database_path: Path) -> None:
+    sweeps = queries.load_sweeps(database_path)
+    if sweeps.empty:
+        st.info(
+            "No parameter sweeps yet. Run e.g. `uv run trading-pipeline --sweep --strategy "
+            "donchian_breakout --period 2018-01-01:2020-12-31 --period 2021-01-01:2023-12-31 "
+            "--period 2024-01-01:`."
+        )
+        return
+
+    def sweep_label(sweep_id: int) -> str:
+        row = sweeps[sweeps["id"] == sweep_id].iloc[0]
+        return f"#{sweep_id} {row['strategy']} ({row['created_at']:%Y-%m-%d %H:%M})"
+
+    sweep_id = st.selectbox("Sweep", sweeps["id"].tolist(), format_func=sweep_label)
+    sweep = sweeps[sweeps["id"] == sweep_id].iloc[0]
+    periods = parse_json(sweep["periods_json"]) or []
+    names = [period["name"] for period in periods]
+    tune = [period["name"] for period in periods if period["role"] == "tune"]
+    check = {period["name"] for period in periods if period["role"] == "check"}
+    grid_keys = list((parse_json(sweep["grid_json"]) or {}).keys())
+    entries = parse_json(sweep["entries_json"]) or []
+    st.caption(
+        f"{sweep['strategy']} on {len(entries)} watchlist entries. Tuned on {', '.join(tune)} "
+        f"(ranked by {sweep['rank_by'].replace('_', ' ')}, profitable in every tune period first, "
+        f"at least {sweep['min_trades']} trades); checked on {', '.join(sorted(check)) or 'nothing'}, "
+        "which played no part in choosing. P/L is in USD with the sweep's sizing (default: $10 risk per trade)."
+    )
+
+    results = queries.load_sweep_results(database_path, sweep_id)
+    table = queries.sweep_config_table(results, names)
+    if table.empty:
+        st.info("This sweep has no results.")
+        return
+    table["config_label"] = table.apply(lambda row: _sweep_config_label(row, grid_keys), axis=1)
+
+    reviewed = table[table["reviewed"]]
+    best = reviewed[reviewed["rank"].notna()].head(1)
+    defaults = reviewed[reviewed["config"] == 0]
+    baseline = reviewed[reviewed["config"] == -1]
+    tiles = st.columns(3)
+    for column, title, frame in [
+        (tiles[0], "Best tuned", best), (tiles[1], "Defaults", defaults), (tiles[2], "sma_rsi", baseline),
+    ]:
+        if frame.empty:
+            column.metric(title, "-")
+            continue
+        row = frame.iloc[0]
+        column.metric(
+            f"{title}: check P/L",
+            f"${row.get('check pnl', float('nan')):,.0f}" if check else "-",
+            f"tune ${row['tune pnl']:,.0f}",
+            delta_color="off",
+        )
+        column.caption(
+            f"{row['config_label']} · check PF {format_number(row.get('check profit_factor'))}, "
+            f"{format_number(row.get('check trades'), 0)} trades"
+        )
+
+    st.subheader("Finalists, defaults and sma_rsi in every period")
+    per_period = queries.summarize_sweep(results, ["config", "period"])
+    labels = dict(zip(table["config"], table["config_label"], strict=True))
+    per_period["config_label"] = per_period["config"].map(labels)
+    st.plotly_chart(
+        build_pnl_heatmap(
+            per_period[per_period["config"].isin(reviewed["config"])], "config_label",
+            reviewed["config_label"].tolist(), names, check,
+        ),
+        width="stretch",
+    )
+
+    st.subheader("Every configuration")
+    columns = ["config_label", "consistent", *[f"pnl {name}" for name in names],
+               "tune trades", "tune win_rate_pct", "tune profit_factor", "tune pnl_per_trade",
+               "check trades", "check profit_factor", "check pnl_per_trade"]
+    st.dataframe(
+        _select_columns(table, columns),
+        column_config={
+            "config_label": st.column_config.TextColumn("Configuration", width="large"),
+            "consistent": st.column_config.CheckboxColumn("Profit in every tune period"),
+            **{f"pnl {name}": st.column_config.NumberColumn(
+                f"{name}{' (check)' if name in check else ''} $", format="%.0f") for name in names},
+            "tune trades": st.column_config.NumberColumn("Tune trades", format="%d"),
+            "tune win_rate_pct": st.column_config.NumberColumn("Tune win %", format="%.1f"),
+            "tune profit_factor": st.column_config.NumberColumn("Tune PF", format="%.2f"),
+            "tune pnl_per_trade": st.column_config.NumberColumn("Tune $/trade", format="%.2f"),
+            "check trades": st.column_config.NumberColumn("Check trades", format="%d"),
+            "check profit_factor": st.column_config.NumberColumn("Check PF", format="%.2f"),
+            "check pnl_per_trade": st.column_config.NumberColumn("Check $/trade", format="%.2f"),
+        },
+        hide_index=True,
+        width="stretch",
+    )
+
+    st.subheader("Per symbol")
+    choice = st.selectbox("Configuration", reviewed["config_label"].tolist(), key="sweep_config")
+    config = int(reviewed.loc[reviewed["config_label"] == choice, "config"].iloc[0])
+    by_symbol = queries.summarize_sweep(results[results["config"] == config], ["symbol", "period"])
+    symbols = by_symbol.groupby("symbol", sort=False)["pnl"].sum().sort_values(ascending=False).index.tolist()
+    st.plotly_chart(build_pnl_heatmap(by_symbol, "symbol", symbols, names, check), width="stretch")
+    label = reviewed.loc[reviewed["config"] == config, "label"].iloc[0]
+    st.caption(
+        f"Full backtests (trades, equity, chart) are in the Backtests tab with label "
+        f"'sweep {sweep_id} {label} <period>' when this configuration was stored in detail "
+        "(the best finalist and the defaults by default)."
+    )
+
+
+def _sweep_config_label(row: pd.Series, grid_keys: list[str]) -> str:
+    if row["config"] == -1:
+        return "sma_rsi (baseline)"
+    if row["config"] == 0:
+        return "defaults"
+    params = parse_json(row["params_json"]) or {}
+    text = ", ".join(f"{key}={params[key]}" for key in grid_keys if key in params)
+    return f"{row['label']} {text}".strip()
 
 
 def _decision_table(decisions: pd.DataFrame) -> pd.DataFrame:

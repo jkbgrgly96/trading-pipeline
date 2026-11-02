@@ -62,9 +62,9 @@ watchlist item (strategy built from the item's name + params; benchmark bars cac
 | `watch.py` | Watchlist TOML loading/validation, `Watcher` loop, error alerts with cooldown |
 | `notifications/` | `Notifier.send_message`, `MultiNotifier`, console, Telegram, `formatting.format_decision` |
 | `backtest/runner.py` | `fetch_backtest_bars` (latest `limit` or a date range + warm-up), Backtesting.py strategy wrapping `BacktestConfig.strategy` + `decisions.evaluate()` with notional, risk or equity-fraction sizing; `default_costs` |
-| `backtest/sweep.py` | Parameter sweep: `DEFAULT_GRIDS`, `parse_grid`, `run_sweep` (in-sample ranking by total P/L, top configs + defaults + `sma_rsi` re-run out of sample) |
+| `backtest/sweep.py` | Parameter sweep: `Period` (tune/check), `DEFAULT_GRIDS`, `parse_grid`, `run_sweep` (rank over tune periods: consistent first, then `profit_factor`/`pnl`/`expectancy`; finalists + defaults + `sma_rsi` also on check periods), `result_rows` for storage |
 | `storage/database.py` | SQLite schema, versioned migrations (`PRAGMA user_version`), all writes |
-| `dashboard/` | Streamlit app (`app.py`), read-only SQL (`queries.py`), Plotly figures (`charts.py`) |
+| `dashboard/` | Streamlit app (`app.py`, tabs incl. Sweeps), read-only SQL (`queries.py`, `sweep_config_table`), Plotly figures (`charts.py`, `build_pnl_heatmap`) |
 
 ## Conventions
 
@@ -112,6 +112,8 @@ watchlist item (strategy built from the item's name + params; benchmark bars cac
 - Stop/target are checked on bar close (alert semantics), not as resting broker orders. They are
   never checked against the bar a position was opened or adopted on.
 - Signals stored before schema v2 have no virtual positions, so their exits are not tracked.
+- Alpaca history starts 2016-01-04 (stocks) and 2021-01-01 (crypto); older sweep periods are
+  partial or empty.
 - Backtests run each symbol on its own (own cash); nothing portfolio-level is simulated, including
   `MAX_OPEN_POSITIONS`. Backtest fills use the bar's prices, so slippage beyond `--spread` is not
   modelled; compare with the paper fill-vs-alert columns.
