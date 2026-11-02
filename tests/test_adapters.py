@@ -66,3 +66,43 @@ def test_multi_notifier_optional_failure_does_not_block():
 def test_multi_notifier_required_failure_raises():
     with pytest.raises(NotificationError):
         MultiNotifier([RecordingNotifier(failures=1)]).send_message("x")
+
+
+def _capture_bar_requests(broker, monkeypatch):
+    from types import SimpleNamespace
+
+    requests = []
+
+    def fake(request):
+        requests.append(request)
+        return SimpleNamespace(data={})
+
+    monkeypatch.setattr(broker._stock_data_client, "get_stock_bars", fake)
+    monkeypatch.setattr(broker._crypto_data_client, "get_crypto_bars", fake)
+    return requests
+
+
+def test_alpaca_stock_bars_are_split_adjusted(monkeypatch):
+    from datetime import UTC, datetime
+
+    from alpaca.common.enums import Sort
+    from alpaca.data.enums import Adjustment
+
+    broker = AlpacaBroker("key", "secret", paper=False)
+    requests = _capture_bar_requests(broker, monkeypatch)
+    start, end = datetime(2020, 1, 1, tzinfo=UTC), datetime(2021, 1, 1, tzinfo=UTC)
+
+    broker.get_bars("AAPL", AssetClass.STOCK, "1Day", 10)
+    broker.get_bars_between("AAPL", AssetClass.STOCK, "1Day", start, end)
+
+    latest, ranged = requests
+    assert latest.adjustment == ranged.adjustment == Adjustment.SPLIT
+    assert (latest.limit, latest.sort) == (10, Sort.DESC)
+    assert (ranged.limit, ranged.sort) == (None, Sort.ASC)
+    # The SDK keeps request times as naive UTC.
+    assert (ranged.start, ranged.end) == (start.replace(tzinfo=None), end.replace(tzinfo=None))
+
+
+def test_alpaca_rejects_unknown_adjustment():
+    with pytest.raises(ValueError, match="adjustment"):
+        AlpacaBroker("key", "secret", paper=False, adjustment="bogus")

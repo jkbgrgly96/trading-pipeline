@@ -15,6 +15,7 @@ class AlpacaBroker(Broker):
         secret_key: str,
         paper: bool = True,
         stock_feed: str = "iex",
+        adjustment: str = "split",
     ) -> None:
         if not api_key or not secret_key:
             raise ValueError("ALPACA_API_KEY and ALPACA_SECRET_KEY must be set.")
@@ -31,6 +32,9 @@ class AlpacaBroker(Broker):
             TradingClient(api_key, secret_key, paper=True) if self._paper else None
         )
         self._stock_feed = _to_data_feed(stock_feed)
+        # Raw stock bars show a split as a crash (or a jump), which fires stops
+        # and fake crossovers in backtests and in live indicators alike.
+        self._adjustment = _to_adjustment(adjustment)
 
     @property
     def is_paper(self) -> bool:
@@ -46,33 +50,48 @@ class AlpacaBroker(Broker):
         parsed = parse_timeframe(timeframe)
         end = datetime.now(UTC)
         start = end - parsed.lookback(asset_class, limit)
+        # Newest first, so ``limit`` keeps the latest bars of the window.
+        return self._fetch_bars(symbol, asset_class, timeframe, start, end, limit, newest_first=True)
 
+    def get_bars_between(
+        self,
+        symbol: str,
+        asset_class: AssetClass,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[Bar]:
+        # No limit: the SDK follows the page tokens until ``end``.
+        return self._fetch_bars(symbol, asset_class, timeframe, start, end, None, newest_first=False)
+
+    def _fetch_bars(
+        self,
+        symbol: str,
+        asset_class: AssetClass,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        limit: int | None,
+        newest_first: bool,
+    ) -> list[Bar]:
         from alpaca.common.enums import Sort
 
+        common: dict[str, Any] = {
+            "symbol_or_symbols": symbol,
+            "timeframe": parse_timeframe(timeframe).to_alpaca(),
+            "start": start,
+            "end": end,
+            "limit": limit,
+            "sort": Sort.DESC if newest_first else Sort.ASC,
+        }
         if asset_class == AssetClass.CRYPTO:
             from alpaca.data.requests import CryptoBarsRequest
 
-            request = CryptoBarsRequest(
-                symbol_or_symbols=symbol,
-                timeframe=parsed.to_alpaca(),
-                start=start,
-                end=end,
-                limit=limit,
-                sort=Sort.DESC,
-            )
-            response = self._crypto_data_client.get_crypto_bars(request)
+            response = self._crypto_data_client.get_crypto_bars(CryptoBarsRequest(**common))
         else:
             from alpaca.data.requests import StockBarsRequest
 
-            request = StockBarsRequest(
-                symbol_or_symbols=symbol,
-                timeframe=parsed.to_alpaca(),
-                start=start,
-                end=end,
-                limit=limit,
-                sort=Sort.DESC,
-                feed=self._stock_feed,
-            )
+            request = StockBarsRequest(**common, feed=self._stock_feed, adjustment=self._adjustment)
             response = self._stock_data_client.get_stock_bars(request)
         return _extract_bars(response, symbol)
 
@@ -177,6 +196,16 @@ def _to_data_feed(value: str) -> Any:
         return mapping[normalized]
     except KeyError as exc:
         raise ValueError(f"Unsupported Alpaca stock feed: {value}") from exc
+
+
+def _to_adjustment(value: str) -> Any:
+    from alpaca.data.enums import Adjustment
+
+    try:
+        return Adjustment(value.strip().lower())
+    except ValueError as exc:
+        options = ", ".join(item.value for item in Adjustment)
+        raise ValueError(f"Unsupported Alpaca adjustment {value!r}; use one of {options}.") from exc
 
 
 def _extract_bars(response: Any, symbol: str) -> list[Bar]:

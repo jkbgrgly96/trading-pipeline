@@ -135,9 +135,28 @@ Backtest (same decision logic, realistic default costs: stocks 0 commission +
 5 bps spread, crypto 0.25 % commission + 5 bps spread):
 
 ```powershell
-uv run trading-pipeline --backtest --symbol AAPL --timeframe 1Day --limit 1000
+# Every watchlist entry (its own strategy, timeframe and notional), from 2021 on:
+uv run trading-pipeline --backtest --start 2021-01-01
+# One symbol, a fixed period:
+uv run trading-pipeline --backtest --symbol AAPL --timeframe 1Day --start 2021-01-01 --end 2024-12-31
 uv run trading-pipeline --backtest --symbol "BTC/USD" --asset-class crypto --timeframe 1Hour --limit 2000
 ```
+
+- **History:** `--start`/`--end` pick the period to trade; earlier bars are
+  fetched automatically to warm up the indicators. Without `--start`, the
+  latest `--limit` bars are used (the first `min_bars` of them only warm up).
+- **Sizing:** each entry buys `notional` USD (`--notional`, or the watchlist
+  entry's), exactly like a paper order, so the P/L per trade is comparable with
+  paper trading. `Return [%]` is relative to `--cash`; look at `P/L [$]` and
+  `Avg. Trade [%]`. `--position-size 0.95` sizes entries as a fraction of
+  current equity instead (compounding).
+- **Prices:** stock bars are split-adjusted (`ALPACA_ADJUSTMENT=split`), so a
+  split no longer looks like a crash. `all` also adjusts for dividends.
+- **Watchlist runs:** without `--symbol`, every watchlist entry is backtested
+  on its own (own cash, no shared limits) and a summary table with the total
+  P/L is printed. Every run is stored and shown in the dashboard.
+- The stats' `Start` is the bar before the first tradable one (Backtesting.py
+  needs one bar of context).
 
 ## Dashboard
 

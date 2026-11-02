@@ -152,7 +152,7 @@ def test_v2_to_v3_records_sma_rsi_without_resending_alerts(tmp_path):
         version = connection.execute("PRAGMA user_version").fetchone()[0]
     assert tuple(signal) == ("sma_rsi", "t")
     assert position["strategy"] == "sma_rsi"
-    assert version == 3
+    assert version == SCHEMA_VERSION
     assert storage.pending_notifications() == []
     assert storage.get_open_position("AAPL", AssetClass.STOCK, "1Day") is not None
 
@@ -166,3 +166,28 @@ def test_duplicate_signal_for_same_bar_is_rejected(tmp_path):
     args = ("TEST", AssetClass.STOCK, "1Day", signal, latest, False)
     assert storage.save_signal(*args) is not None
     assert storage.save_signal(*args) is None
+
+
+def test_backtests_stored_before_v4_are_marked_equity_fraction(tmp_path):
+    import sqlite3
+
+    from trading_pipeline.storage.database import SCHEMA_V1
+
+    path = tmp_path / "old.sqlite3"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(SCHEMA_V1)
+    legacy.execute(
+        """
+        INSERT INTO backtest_runs (created_at, symbol, asset_class, timeframe, bar_limit, cash,
+            commission, spread, position_size, stats_json)
+        VALUES ('t', 'AAPL', 'stock', '1Day', 250, 10000, 0, 0, 0.95, '{}')
+        """
+    )
+    legacy.commit()
+    legacy.close()
+
+    Storage(path).initialize()
+
+    with sqlite3.connect(path) as connection:
+        row = connection.execute("SELECT strategy, sizing, notional, position_size FROM backtest_runs").fetchone()
+    assert row == ("sma_rsi", "equity_fraction", None, 0.95)

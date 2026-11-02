@@ -47,14 +47,14 @@ Tests never hit the network. Use `tests/fakes.py` (`FakeBroker`,
 | `domain.py` | Frozen dataclasses/enums: `Bar`, `Signal`, `Decision`, `OpenPosition`, `SignalAction`, `DecisionAction`, `ExitReason` |
 | `timeframes.py` | Parse `5Min`/`1Hour`/`1Day`, Alpaca mapping, lookback windows, `closed_bars` |
 | `config.py` | `Settings` from env + `.env` loader; `orders_enabled` safety gate |
-| `brokers/base.py`, `brokers/alpaca.py` | `Broker` ABC (bars, position, buy, close, order status) and the paper-only Alpaca adapter |
+| `brokers/base.py`, `brokers/alpaca.py` | `Broker` ABC (latest bars, bars in a date range, position, buy, close, order status) and the paper-only Alpaca adapter (split-adjusted stock bars via `ALPACA_ADJUSTMENT`) |
 | `features/` | `IndicatorDefinition` list → `compute_feature_frame` (pandas-ta-classic) → `FeatureSnapshot`; `snapshots_from_frame` for bulk |
 | `strategies/` | `base.py`: `Strategy` ABC (`features`, `min_bars`, `signal`, `risk_levels`) and `History` (look-ahead-free view); `__init__.py`: `STRATEGIES` registry, `get_strategy`; `sma_rsi.py`: `SmaRsiStrategy` (default) |
 | `decisions.py` | `decide()`: the single source of truth for entries/exits (live + backtest) |
 | `pipeline.py` | `run_once`, `deliver`, `flush_outbox`, position reconciliation, order application |
 | `watch.py` | Watchlist TOML loading/validation, `Watcher` loop, error alerts with cooldown |
 | `notifications/` | `Notifier.send_message`, `MultiNotifier`, console, Telegram, `formatting.format_decision` |
-| `backtest/runner.py` | Backtesting.py strategy wrapping `BacktestConfig.strategy` + `decide()`; `default_costs` |
+| `backtest/runner.py` | `fetch_backtest_bars` (latest `limit` or a date range + warm-up), Backtesting.py strategy wrapping `BacktestConfig.strategy` + `decide()` with notional or equity-fraction sizing; `default_costs` |
 | `storage/database.py` | SQLite schema, versioned migrations (`PRAGMA user_version`), all writes |
 | `dashboard/` | Streamlit app (`app.py`), read-only SQL (`queries.py`), Plotly figures (`charts.py`) |
 
@@ -100,5 +100,9 @@ Tests never hit the network. Use `tests/fakes.py` (`FakeBroker`,
 - Stop/target are checked on bar close (alert semantics), not as resting broker orders. They are
   never checked against the bar a position was opened or adopted on.
 - Signals stored before schema v2 have no virtual positions, so their exits are not tracked.
+- Backtests run each symbol on its own (own cash); nothing portfolio-level is simulated. Backtest
+  fills use the bar's prices, so slippage beyond `--spread` is not modelled.
+- Stock bars are split-adjusted, but a position held through a split keeps its pre-split entry,
+  stop and target, so the first post-split bar looks like a stop-loss. Close such positions by hand.
 - One strategy per symbol/asset class/timeframe (signals and positions are keyed by those).
   Changing an entry's strategy hands its open position to the new one, with the stored stop/target.

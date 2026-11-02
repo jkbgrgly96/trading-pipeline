@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 
 from trading_pipeline.domain import AssetClass, Bar
 
@@ -41,6 +42,19 @@ class Broker(ABC):
         timeframe: str,
         limit: int,
     ) -> list[Bar]:
+        """The latest ``limit`` bars, oldest first (the newest may still be forming)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_bars_between(
+        self,
+        symbol: str,
+        asset_class: AssetClass,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[Bar]:
+        """Every bar starting in ``[start, end)``, oldest first (for backtests)."""
         raise NotImplementedError
 
     @abstractmethod
