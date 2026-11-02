@@ -24,11 +24,14 @@ def format_decision(
     decision: Decision,
     timeframe: str,
     order_line: str,
+    strategy: str | None = None,
 ) -> str:
     signal = decision.signal
     header_context = (
         f"{timeframe} · {signal.asset_class.value} · bar {_bar_time(signal.timestamp, timeframe)}"
     )
+    if strategy:
+        header_context += f" · {strategy}"
 
     if decision.action == DecisionAction.ENTER_LONG:
         lines = [

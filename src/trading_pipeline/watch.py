@@ -16,6 +16,7 @@ from trading_pipeline.notifications.base import Notifier
 from trading_pipeline.notifications.formatting import format_error
 from trading_pipeline.pipeline import InsufficientBarsError, flush_outbox, run_once
 from trading_pipeline.storage import Storage
+from trading_pipeline.strategies import DEFAULT_STRATEGY, Strategy, get_strategy
 from trading_pipeline.timeframes import parse_timeframe
 
 logger = logging.getLogger(__name__)
@@ -34,21 +35,30 @@ class WatchItem:
     timeframe: str
     limit: int = 250
     notional: float = 100.0
+    strategy: str = DEFAULT_STRATEGY
 
     @property
     def label(self) -> str:
         return f"{self.symbol} {self.timeframe} ({self.asset_class.value})"
 
 
-def load_watchlist(path: str | Path, default_limit: int, default_notional: float) -> list[WatchItem]:
+def load_watchlist(
+    path: str | Path,
+    default_limit: int,
+    default_notional: float,
+    default_strategy: str = DEFAULT_STRATEGY,
+) -> list[WatchItem]:
     data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     defaults = data.get("defaults", {})
     limit = int(defaults.get("limit", default_limit))
     notional = float(defaults.get("notional", default_notional))
+    strategy = str(defaults.get("strategy", default_strategy))
     items = []
     for entry in data.get("watch", []):
         timeframe = str(entry.get("timeframe", defaults.get("timeframe", "1Day")))
         parse_timeframe(timeframe)  # fail fast on typos
+        item_strategy = str(entry.get("strategy", strategy))
+        get_strategy(item_strategy)  # fail fast on unknown names
         items.append(
             WatchItem(
                 symbol=str(entry["symbol"]),
@@ -56,6 +66,7 @@ def load_watchlist(path: str | Path, default_limit: int, default_notional: float
                 timeframe=timeframe,
                 limit=int(entry.get("limit", limit)),
                 notional=float(entry.get("notional", notional)),
+                strategy=item_strategy,
             )
         )
     if not items:
@@ -66,7 +77,16 @@ def load_watchlist(path: str | Path, default_limit: int, default_notional: float
 def validate_watchlist(items: list[WatchItem], orders_enabled: bool) -> None:
     keys = [(item.symbol, item.asset_class, item.timeframe) for item in items]
     if len(set(keys)) != len(keys):
+        # Stored signals and positions are keyed by symbol/asset_class/timeframe,
+        # so two strategies cannot share one.
         raise ValueError("Watchlist contains duplicate symbol/asset_class/timeframe entries.")
+    for item in items:
+        min_bars = get_strategy(item.strategy).min_bars
+        if item.limit < min_bars:
+            raise ValueError(
+                f"{item.label}: limit {item.limit} is below the {min_bars} bars "
+                f"{item.strategy} needs."
+            )
     if orders_enabled:
         symbols = [item.symbol for item in items]
         duplicates = sorted({symbol for symbol in symbols if symbols.count(symbol) > 1})
@@ -106,6 +126,9 @@ class Watcher:
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         validate_watchlist(items, orders_enabled)
+        self._strategies: dict[WatchItem, Strategy] = {
+            item: get_strategy(item.strategy) for item in items
+        }
         self.broker = broker
         self.storage = storage
         self.notifier = notifier
@@ -130,7 +153,7 @@ class Watcher:
     def run_forever(self, interval: timedelta | None = None, max_cycles: int | None = None) -> None:
         interval = interval or default_interval(self.items)
         mode = "PAPER ORDERS ON" if self.orders_enabled else "alerts only"
-        symbols = ", ".join(item.label for item in self.items)
+        symbols = ", ".join(f"{item.label} [{item.strategy}]" for item in self.items)
         self._safe_notify(
             f"▶️ Watcher started ({mode}), every {interval}.\nWatching: {symbols}"
         )
@@ -167,6 +190,7 @@ class Watcher:
                 storage=self.storage,
                 notify_hold=self.notify_hold,
                 now=self._clock(),
+                strategy=self._strategies[item],
             )
         except InsufficientBarsError as exc:
             logger.warning("%s", exc)

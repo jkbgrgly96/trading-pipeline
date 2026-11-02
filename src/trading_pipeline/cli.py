@@ -11,6 +11,7 @@ from trading_pipeline.domain import AssetClass
 from trading_pipeline.notifications.base import MultiNotifier, Notifier
 from trading_pipeline.notifications.console import ConsoleNotifier
 from trading_pipeline.storage import Storage
+from trading_pipeline.strategies import available_strategies, get_strategy
 from trading_pipeline.timeframes import parse_timeframe
 
 logger = logging.getLogger("trading_pipeline")
@@ -43,6 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Asset class to request from Alpaca.",
     )
     parser.add_argument("--timeframe", help="e.g. 1Min, 5Min, 15Min, 1Hour, 4Hour, 1Day.")
+    parser.add_argument(
+        "--strategy",
+        choices=available_strategies(),
+        help="Strategy for a single symbol or backtest, and the watchlist default "
+        "(default: DEFAULT_STRATEGY or sma_rsi).",
+    )
     parser.add_argument("--limit", type=int, help="Number of bars to request.")
     parser.add_argument("--notional", type=float, help="Paper order size in USD.")
     parser.add_argument(
@@ -109,11 +116,13 @@ def main(argv: list[str] | None = None) -> int:
     symbol = args.symbol or settings.default_symbol
     asset_class = AssetClass(args.asset_class or settings.default_asset_class)
     timeframe = args.timeframe or settings.default_timeframe
+    strategy_name = args.strategy or settings.default_strategy
     limit = args.limit if args.limit is not None else settings.default_bar_limit
     notional = args.notional if args.notional is not None else settings.default_notional
 
     try:
         parse_timeframe(timeframe)
+        strategy = get_strategy(strategy_name)
         if not 0 < args.position_size <= 1:
             raise ValueError("--position-size must be in (0, 1].")
         if limit <= 0 or notional <= 0:
@@ -133,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     storage.initialize()
 
     if args.backtest:
-        return _run_backtest(args, broker, storage, symbol, asset_class, timeframe, limit)
+        return _run_backtest(args, broker, storage, symbol, asset_class, timeframe, limit, strategy_name)
 
     notifier = build_notifier(args.telegram, settings)
     _log_mode(settings)
@@ -144,11 +153,11 @@ def main(argv: list[str] | None = None) -> int:
 
         watchlist_path = Path(args.watchlist or settings.watchlist_path)
         if watchlist_path.exists():
-            items = load_watchlist(watchlist_path, limit, notional)
+            items = load_watchlist(watchlist_path, limit, notional, strategy_name)
         else:
             if args.watchlist:
                 parser.error(f"Watchlist not found: {watchlist_path}")
-            items = [WatchItem(symbol, asset_class, timeframe, limit, notional)]
+            items = [WatchItem(symbol, asset_class, timeframe, limit, notional, strategy_name)]
         watcher = Watcher(
             broker=broker,
             storage=storage,
@@ -180,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         notional=notional,
         storage=storage,
         notify_hold=notify_hold,
+        strategy=strategy,
     )
     if result.status == "already_processed":
         print(f"bar {result.bar_timestamp.isoformat()} already processed; nothing to do")
@@ -211,7 +221,7 @@ def _log_mode(settings: Settings) -> None:
         logger.warning("ALPACA_PAPER=false: trading endpoints are disabled; only market data is used.")
 
 
-def _run_backtest(args, broker, storage, symbol, asset_class, timeframe, limit) -> int:
+def _run_backtest(args, broker, storage, symbol, asset_class, timeframe, limit, strategy_name) -> int:
     from trading_pipeline.backtest.runner import (
         BacktestConfig,
         default_costs,
@@ -223,6 +233,7 @@ def _run_backtest(args, broker, storage, symbol, asset_class, timeframe, limit) 
     config = BacktestConfig(
         symbol=symbol,
         asset_class=asset_class,
+        strategy=strategy_name,
         cash=args.cash,
         commission=args.commission if args.commission is not None else default_commission,
         spread=args.spread if args.spread is not None else default_spread,
@@ -249,7 +260,7 @@ def _run_backtest(args, broker, storage, symbol, asset_class, timeframe, limit) 
     )
     for key, value in summarize_stats(result.stats).items():
         print(f"{key}={value}")
-    print(f"commission={config.commission} spread={config.spread}")
+    print(f"strategy={config.strategy} commission={config.commission} spread={config.spread}")
     print(f"backtest_run_id={run_id}")
     return 0
 

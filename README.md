@@ -9,9 +9,11 @@ It never places real-money orders.
 
 On every **closed** bar, per symbol:
 
-1. **Signal** (strategy view): SMA 20/50 crossover, RSI filter, candlestick
-   pattern bonus → `BUY`, `SELL` or `HOLD`.
-2. **Decision** (what *you* should do), combining the signal with your position:
+1. **Signal** (strategy view): the symbol's [strategy](#strategies) turns the
+   indicator history into `BUY`, `SELL` or `HOLD`. The default, `sma_rsi`, uses an
+   SMA 20/50 crossover, an RSI filter and a candlestick pattern bonus.
+2. **Decision** (what *you* should do), combining the signal with your position
+   (the table shows the default `sma_rsi` rules):
 
    | You are | Signal / bar | Decision → alert |
    |---|---|---|
@@ -29,10 +31,10 @@ Example alert (illustrative values):
 
 ```text
 🟢 BUY AAPL — enter long
-1Day · stock · bar 2026-06-25
+1Day · stock · bar 2026-06-25 · sma_rsi
 Price: 122.55
 Stop: 117.64 (-4.00%)   Target: 132.35 (+8.00%)
-Why: sma20_crossed_above_sma50, rsi=69.2, bullish_candle_pattern=bullish_highwave
+Why: sma_20_crossed_above_sma_50, rsi=69.2, bullish_candle_pattern=bullish_highwave
 Confidence: 0.75
 Paper order: not placed (alerts only)
 ```
@@ -125,6 +127,10 @@ uv run trading-pipeline --symbol "BTC/USD" --asset-class crypto --timeframe 1Hou
 
 Timeframes: `1Min`–`59Min`, `1Hour`–`23Hour`, `1Day`.
 
+Strategy: `strategy = "..."` per `[[watch]]` entry or under `[defaults]` in
+`watchlist.toml`; `--strategy` for a single symbol or a backtest, which is also
+the watchlist default (fallback: `DEFAULT_STRATEGY`, then `sma_rsi`).
+
 Backtest (same decision logic, realistic default costs: stocks 0 commission +
 5 bps spread, crypto 0.25 % commission + 5 bps spread):
 
@@ -168,15 +174,32 @@ SQLite (`DATABASE_PATH`, default `data/trading_pipeline.sqlite3`, git-ignored),
 versioned with `PRAGMA user_version` and migrated automatically on start:
 
 - `market_bars`, `feature_snapshots`: OHLCV and indicator values per bar
-- `signals`: one row per processed bar: signal, decision, reason, order
+- `signals`: one row per processed bar: strategy, signal, decision, reason, order
   status, and the notification outbox (`notify_message`, `notified_at`, …)
-- `positions`: virtual/paper positions with entry, stop, target, exit and reason
+- `positions`: virtual/paper positions with strategy, entry, stop, target, exit and reason
 - `symbol_status`: watcher health per symbol
-- `backtest_runs`, `backtest_trades`, `backtest_equity_curve`
+- `backtest_runs` (with strategy), `backtest_trades`, `backtest_equity_curve`
 
-## Current strategy
+## Strategies
 
-Deliberately simple, a starting point for validating the pipeline rather than a
-production strategy: SMA 20/50 crossover, RSI 14 filter, pandas-ta-classic
-candlestick confirmation, fixed −4 %/+8 % stop/target. MACD, Bollinger Bands
-and ATR are already computed for future strategy and risk work.
+A strategy (`strategies/base.py`) only produces signals; entries and exits are
+always decided by `decisions.decide`, live and in the backtest. It defines:
+
+- `name`: the key used in `watchlist.toml`, `--strategy` and the database
+- `features`: indicators it reads, computed on top of `DEFAULT_FEATURES`
+  (SMA 20/50, RSI 14, MACD, Bollinger Bands, ATR 14, candle patterns), which
+  are always computed because the dashboard chart draws them
+- `min_bars`: closed bars needed before the first signal
+- `signal(symbol, asset_class, history)`: `BUY` / `SELL` / `HOLD` for
+  `history.latest`. `history` holds the bars up to the evaluated one only, so
+  the strategy cannot look ahead.
+- `risk_levels(entry_price, latest)`: stop and target for a new long (either
+  may be `None`); also used for positions adopted from the paper account
+
+To add one: subclass `Strategy` as a frozen dataclass whose fields are its
+parameters, register it in `strategies/__init__.py` (`STRATEGIES`), add tests,
+then backtest it with `--strategy <name>`.
+
+`sma_rsi` (default) is deliberately simple, a starting point for validating the
+pipeline rather than a production strategy: SMA 20/50 crossover, RSI 14 filter,
+pandas-ta-classic candlestick confirmation, fixed −4 %/+8 % stop/target.

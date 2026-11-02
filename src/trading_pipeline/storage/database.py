@@ -23,7 +23,7 @@ from trading_pipeline.features import FeatureSnapshot, snapshots_from_frame
 if TYPE_CHECKING:
     from trading_pipeline.backtest.runner import BacktestConfig, BacktestResult
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class Storage:
@@ -68,6 +68,8 @@ class Storage:
                     _execute_script(connection, SCHEMA_V1)
                 if version < 2:
                     _migrate_to_v2(connection)
+                if version < 3:
+                    _migrate_to_v3(connection)
                 if version < SCHEMA_VERSION:
                     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 connection.execute("COMMIT")
@@ -190,6 +192,7 @@ class Storage:
         decision: Decision | None = None,
         notify_required: bool = False,
         notify_message: str | None = None,
+        strategy: str | None = None,
     ) -> int | None:
         """Insert the signal/decision for a bar.
 
@@ -204,9 +207,9 @@ class Storage:
                     action, confidence, latest_close, reason, patterns_json,
                     features_json, order_id, orders_enabled, decision,
                     decision_reason, stop_loss, take_profit, notify_required,
-                    notify_message
+                    notify_message, strategy
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol, asset_class, timeframe, bar_timestamp) DO NOTHING
                 """,
                 (
@@ -229,6 +232,7 @@ class Storage:
                     decision.take_profit if decision else signal.take_profit,
                     int(notify_required),
                     notify_message,
+                    strategy,
                 ),
             )
             if cursor.rowcount == 0:
@@ -376,6 +380,7 @@ class Storage:
         quantity: float | None = None,
         entry_signal_id: int | None = None,
         entry_order_id: str | None = None,
+        strategy: str | None = None,
     ) -> int:
         now = _now()
         with self.connect() as connection:
@@ -384,9 +389,9 @@ class Storage:
                 INSERT INTO positions (
                     symbol, asset_class, timeframe, source, status, entry_time,
                     entry_price, quantity, stop_loss, take_profit, entry_signal_id,
-                    entry_order_id, created_at, updated_at
+                    entry_order_id, created_at, updated_at, strategy
                 )
-                VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     symbol,
@@ -402,6 +407,7 @@ class Storage:
                     entry_order_id,
                     now,
                     now,
+                    strategy,
                 ),
             )
             return int(cursor.lastrowid)
@@ -498,9 +504,9 @@ class Storage:
                     created_at, symbol, asset_class, timeframe, bar_limit, cash,
                     commission, spread, position_size, start, end, return_pct,
                     buy_hold_return_pct, max_drawdown_pct, sharpe_ratio,
-                    trade_count, win_rate_pct, stats_json
+                    trade_count, win_rate_pct, stats_json, strategy
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _now(),
@@ -521,6 +527,7 @@ class Storage:
                     _to_storage_value(summary.get("# Trades")),
                     _to_storage_value(summary.get("Win Rate [%]")),
                     _json(summary),
+                    config.strategy,
                 ),
             )
             run_id = int(cursor.lastrowid)
@@ -671,6 +678,17 @@ def _migrate_to_v2(connection: sqlite3.Connection) -> None:
         """
         + POSITIONS_AND_STATUS,
     )
+
+
+def _migrate_to_v3(connection: sqlite3.Connection) -> None:
+    """Record which strategy produced each signal, position and backtest.
+
+    Everything stored before v3 came from the only strategy that existed,
+    ``sma_rsi``. Notification columns are untouched, so nothing is re-sent.
+    """
+    for table in ("signals", "positions", "backtest_runs"):
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN strategy TEXT")
+        connection.execute(f"UPDATE {table} SET strategy = 'sma_rsi'")
 
 
 def _execute_script(connection: sqlite3.Connection, script: str) -> None:

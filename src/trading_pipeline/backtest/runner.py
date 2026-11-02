@@ -10,7 +10,7 @@ from trading_pipeline.decisions import decide
 from trading_pipeline.domain import AssetClass, Bar, DecisionAction, OpenPosition
 from trading_pipeline.features import compute_feature_frame, snapshots_from_frame
 from trading_pipeline.features.frame import bars_to_ohlcv_frame
-from trading_pipeline.strategies.sma_rsi import MIN_BARS, generate_signal_from_features
+from trading_pipeline.strategies import DEFAULT_STRATEGY, History, Strategy, get_strategy
 
 __all__ = [
     "BacktestConfig",
@@ -37,6 +37,7 @@ def default_costs(asset_class: AssetClass) -> tuple[float, float]:
 class BacktestConfig:
     symbol: str
     asset_class: AssetClass
+    strategy: str = DEFAULT_STRATEGY
     cash: float = 10_000.0
     commission: float = 0.0
     spread: float = 0.0
@@ -57,8 +58,9 @@ def run_strategy_backtest(bars: list[Bar], config: BacktestConfig) -> BacktestRe
     from backtesting import Backtest
     from backtesting.lib import FractionalBacktest
 
-    feature_frame = compute_feature_frame(bars)
-    strategy = _build_strategy_class(config, feature_frame)
+    strategy = get_strategy(config.strategy)
+    feature_frame = compute_feature_frame(bars, strategy.feature_definitions())
+    strategy_class = _build_strategy_class(config, strategy, feature_frame)
     backtest_class = (
         FractionalBacktest if config.asset_class == AssetClass.CRYPTO else Backtest
     )
@@ -73,7 +75,7 @@ def run_strategy_backtest(bars: list[Bar], config: BacktestConfig) -> BacktestRe
     if backtest_class is FractionalBacktest:
         backtest_kwargs["fractional_unit"] = config.fractional_unit
 
-    backtest = backtest_class(feature_frame, strategy, **backtest_kwargs)
+    backtest = backtest_class(feature_frame, strategy_class, **backtest_kwargs)
     stats = backtest.run()
     return BacktestResult(
         stats=stats,
@@ -100,15 +102,15 @@ def summarize_stats(stats: Any) -> dict[str, Any]:
     return {key: stats[key] for key in keys if key in stats}
 
 
-def _build_strategy_class(config: BacktestConfig, feature_frame: pd.DataFrame):
-    from backtesting import Strategy
+def _build_strategy_class(config: BacktestConfig, strategy: Strategy, feature_frame: pd.DataFrame):
+    from backtesting import Strategy as BacktestingStrategy
 
     # Features are causal (verified: values at bar i do not change when later
     # bars are added), so precomputing every snapshot once is safe and avoids
     # rebuilding a snapshot from ~75 columns on every step.
     snapshots = snapshots_from_frame(feature_frame)
 
-    class SmaRsiBacktestingStrategy(Strategy):
+    class PipelineStrategy(BacktestingStrategy):
         symbol = config.symbol
         asset_class = config.asset_class
         position_size = config.position_size
@@ -118,16 +120,11 @@ def _build_strategy_class(config: BacktestConfig, feature_frame: pd.DataFrame):
 
         def next(self) -> None:
             index = len(self.data) - 1
-            if index + 1 < MIN_BARS:
+            if index + 1 < strategy.min_bars:
                 return
 
             latest = snapshots[index]
-            signal = generate_signal_from_features(
-                symbol=self.symbol,
-                asset_class=self.asset_class,
-                latest=latest,
-                previous=snapshots[index - 1],
-            )
+            signal = strategy.signal(self.symbol, self.asset_class, History(snapshots, index + 1))
             if not self.position:
                 # Closed by the engine (e.g. finalize) or never opened.
                 self._open = None
@@ -148,7 +145,8 @@ def _build_strategy_class(config: BacktestConfig, feature_frame: pd.DataFrame):
                 self.position.close()
                 self._open = None
 
-    return SmaRsiBacktestingStrategy
+    PipelineStrategy.__name__ = PipelineStrategy.__qualname__ = f"Pipeline[{strategy.name}]"
+    return PipelineStrategy
 
 
 def _as_datetime(value: Any) -> datetime:
